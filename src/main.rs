@@ -145,12 +145,6 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
 
     let code = match cli.command {
@@ -173,6 +167,12 @@ async fn main() {
             verbose,
             quiet,
         } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "warn".into()),
+                )
+                .init();
             run_pipeline(RunConfig {
                 file,
                 git_ref,
@@ -208,12 +208,12 @@ async fn main() {
             poll_interval,
             concurrency,
         } => {
-            // Switch to info-level logging for daemon mode.
-            drop(
-                tracing_subscriber::fmt()
-                    .with_env_filter("gauntlet=info,tasked=info")
-                    .try_init(),
-            );
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "gauntlet=info,tasked=info".into()),
+                )
+                .init();
 
             let data_dir = shellexpand::tilde(&data_dir).to_string();
             let private_key = shellexpand::tilde(&github_private_key).to_string();

@@ -290,13 +290,17 @@ async fn trigger_build(state: &AppState, event: &GitHubEvent) -> Result<(), Stri
 
     let pipeline_json = std::fs::read_to_string(&pipeline_path)
         .map_err(|e| format!("failed to read pipeline: {e}"))?;
-    let pipeline: Pipeline = serde_json::from_str(&pipeline_json)
+    let mut pipeline: Pipeline = serde_json::from_str(&pipeline_json)
         .map_err(|e| format!("failed to parse pipeline: {e}"))?;
+
+    // Workspace manager already cloned and checked out the SHA.
+    // Disable the pipeline's checkout step to avoid double-checkout.
+    pipeline.checkout = crate::schema::CheckoutSetting::Enabled(false);
 
     // Compile.
     let ctx = BuildContext {
         repo_dir: Some(workspace_dir.to_string_lossy().to_string()),
-        git_ref: Some(sha.clone()),
+        git_ref: None, // Already checked out by workspace manager.
         branch: Some(branch.clone()),
         event: Some(match event {
             GitHubEvent::Push { .. } => "push".to_string(),
