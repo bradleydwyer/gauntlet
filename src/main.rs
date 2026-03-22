@@ -231,12 +231,29 @@ async fn main() {
             poll_interval,
             concurrency,
         } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "gauntlet=info,tasked=info".into()),
-                )
-                .init();
+            // In TUI mode, send logs to a file so they don't interfere.
+            // In non-TTY mode, send to stderr.
+            let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            if is_tty {
+                let log_dir = dirs::home_dir().unwrap_or_default().join(".gauntlet");
+                let _ = std::fs::create_dir_all(&log_dir);
+                let log_file = std::fs::File::create(log_dir.join("serve.log")).unwrap();
+                tracing_subscriber::fmt()
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "gauntlet=info,tasked=info".into()),
+                    )
+                    .with_writer(log_file)
+                    .with_ansi(false)
+                    .init();
+            } else {
+                tracing_subscriber::fmt()
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "gauntlet=info,tasked=info".into()),
+                    )
+                    .init();
+            }
 
             // Load config file, CLI args override.
             let cfg = gauntlet::config::Config::load_default();

@@ -43,7 +43,8 @@ impl WorkspaceManager {
         let workspace = self.workspace_path(repo_full_name);
 
         if workspace.exists() {
-            self.fetch_and_checkout(&workspace, sha).await?;
+            self.fetch_and_checkout(&workspace, repo_full_name, sha, token)
+                .await?;
         } else {
             self.clone_repo(repo_full_name, token, &workspace).await?;
             self.checkout(&workspace, sha).await?;
@@ -81,11 +82,26 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    async fn fetch_and_checkout(&self, workspace: &Path, sha: &str) -> Result<(), WorkspaceError> {
+    async fn fetch_and_checkout(
+        &self,
+        workspace: &Path,
+        repo_full_name: &str,
+        sha: &str,
+        token: &str,
+    ) -> Result<(), WorkspaceError> {
         debug!(sha, path = %workspace.display(), "fetching sha");
 
+        // Update remote URL with fresh token (tokens are short-lived).
+        let url = format!("https://x-access-token:{token}@github.com/{repo_full_name}.git");
+        let _ = Command::new("git")
+            .args(["remote", "set-url", "origin", &url])
+            .current_dir(workspace)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .await;
+
         let output = Command::new("git")
-            .args(["fetch", "origin", sha])
+            .args(["fetch", "origin"])
             .current_dir(workspace)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
@@ -96,7 +112,7 @@ impl WorkspaceManager {
             return Err(WorkspaceError::FetchFailed(stderr.into_owned()));
         }
 
-        self.checkout(workspace, "FETCH_HEAD").await
+        self.checkout(workspace, sha).await
     }
 
     async fn checkout(&self, workspace: &Path, reference: &str) -> Result<(), WorkspaceError> {
