@@ -46,6 +46,7 @@ struct AppState {
     github_app: Arc<GitHubApp>,
     workspace: WorkspaceManager,
     webhook_secret: Option<String>,
+    logs_dir: PathBuf,
     /// Track last seen SHA per repo+branch to avoid duplicate builds.
     last_seen: Mutex<HashMap<String, String>>,
     /// Track active builds: flow_id → (repo, sha, check_run_id).
@@ -114,11 +115,15 @@ pub async fn run(config: ServeConfig) {
         engine_handle.run().await;
     });
 
+    let logs_dir = config.data_dir.join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+
     let state = Arc::new(AppState {
         engine: engine.clone(),
         github_app: config.github_app.clone(),
         workspace,
         webhook_secret: config.webhook_secret.clone(),
+        logs_dir,
         last_seen: Mutex::new(HashMap::new()),
         active_builds: Mutex::new(HashMap::new()),
     });
@@ -127,6 +132,8 @@ pub async fn run(config: ServeConfig) {
     let app = Router::new()
         .route("/webhook/github", post(handle_webhook))
         .route("/status", get(handle_status))
+        .route("/builds/{flow_id}/logs", get(handle_build_logs))
+        .route("/builds/{flow_id}/logs/{step}", get(handle_step_log))
         .with_state(state.clone());
 
     let addr = format!("0.0.0.0:{}", config.port);
@@ -231,6 +238,109 @@ async fn handle_status(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         "status": "ok",
         "active_builds": active,
     }))
+}
+
+async fn handle_build_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(flow_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    // Try to get tasks from the engine (for active builds).
+    let tasks = state
+        .engine
+        .get_flow_tasks(&tasked::types::FlowId(flow_id.clone()))
+        .await
+        .unwrap_or_default();
+
+    if !tasks.is_empty() {
+        let logs: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|t| {
+                let stdout = t
+                    .output
+                    .as_ref()
+                    .and_then(|o| o.get("stdout"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let stderr = t
+                    .output
+                    .as_ref()
+                    .and_then(|o| o.get("stderr"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                serde_json::json!({
+                    "step": t.id.0,
+                    "state": format!("{}", t.state),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "error": t.error,
+                })
+            })
+            .collect();
+        return Json(serde_json::json!({"flow_id": flow_id, "tasks": logs})).into_response();
+    }
+
+    // Fall back to disk logs.
+    let log_dir = state.logs_dir.join(&flow_id);
+    if log_dir.exists() {
+        let mut logs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&log_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str()
+                    && name.ends_with(".log")
+                {
+                    let step = name.trim_end_matches(".log");
+                    let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                    logs.push(serde_json::json!({"step": step, "output": content}));
+                }
+            }
+        }
+        return Json(serde_json::json!({"flow_id": flow_id, "tasks": logs})).into_response();
+    }
+
+    (StatusCode::NOT_FOUND, "build not found").into_response()
+}
+
+async fn handle_step_log(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((flow_id, step)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    // Try engine first.
+    if let Ok(tasks) = state
+        .engine
+        .get_flow_tasks(&tasked::types::FlowId(flow_id.clone()))
+        .await
+        && let Some(task) = tasks.iter().find(|t| t.id.0 == step)
+    {
+        let stdout = task
+            .output
+            .as_ref()
+            .and_then(|o| o.get("stdout"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let stderr = task
+            .output
+            .as_ref()
+            .and_then(|o| o.get("stderr"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Json(serde_json::json!({
+            "step": step,
+            "state": format!("{}", task.state),
+            "stdout": stdout,
+            "stderr": stderr,
+            "error": task.error,
+        }))
+        .into_response();
+    }
+
+    // Fall back to disk.
+    let log_path = state.logs_dir.join(&flow_id).join(format!("{step}.log"));
+    if log_path.exists() {
+        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        return Json(serde_json::json!({"step": step, "output": content})).into_response();
+    }
+
+    (StatusCode::NOT_FOUND, "step log not found").into_response()
 }
 
 // ── Build triggering ──
@@ -506,7 +616,20 @@ async fn build_monitor(state: Arc<AppState>) {
                 continue;
             }
 
-            // Flow is done — update GitHub.
+            // Flow is done — fetch tasks, write logs, print to terminal.
+            let tasks = state
+                .engine
+                .get_flow_tasks(&tasked::types::FlowId(flow_id.clone()))
+                .await
+                .unwrap_or_default();
+
+            // Write logs to disk.
+            write_logs_to_disk(&state.logs_dir, flow_id, build_info, &tasks);
+
+            // Print results to terminal.
+            print_build_results(flow_id, build_info, &flow, &tasks);
+
+            // Update GitHub.
             let token = match state.github_app.token().await {
                 Ok(t) => t,
                 Err(e) => {
@@ -530,13 +653,6 @@ async fn build_monitor(state: Arc<AppState>) {
                     FlowState::Cancelled => CheckConclusion::Cancelled,
                     _ => continue,
                 };
-
-                // Fetch task details for the output.
-                let tasks = state
-                    .engine
-                    .get_flow_tasks(&tasked::types::FlowId(flow_id.clone()))
-                    .await
-                    .unwrap_or_default();
 
                 let mut text = format_build_output(&tasks);
                 // GitHub Checks API limits text to 65535 characters.
@@ -675,4 +791,103 @@ fn format_build_output(tasks: &[tasked::types::Task]) -> String {
 /// Truncate a string to max_len, appending "..." if truncated.
 fn truncate(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len { s } else { &s[..max_len] }
+}
+
+/// Write build logs to disk at ~/.gauntlet/logs/{flow_id}/{step}.log
+fn write_logs_to_disk(
+    logs_dir: &std::path::Path,
+    flow_id: &str,
+    build_info: &BuildInfo,
+    tasks: &[tasked::types::Task],
+) {
+    let flow_dir = logs_dir.join(flow_id);
+    if let Err(e) = std::fs::create_dir_all(&flow_dir) {
+        warn!(error = %e, flow_id, "failed to create log directory");
+        return;
+    }
+
+    // Write a summary file.
+    let summary = format!(
+        "repo: {}\nsha: {}\ntasks: {}\n",
+        build_info.repo,
+        build_info.sha,
+        tasks.len()
+    );
+    let _ = std::fs::write(flow_dir.join("summary.txt"), summary);
+
+    // Write per-step logs.
+    for task in tasks {
+        let mut log = String::new();
+        log.push_str(&format!("# {} ({})\n\n", task.id.0, task.state));
+
+        if let Some(ref error) = task.error {
+            log.push_str(&format!("ERROR: {error}\n\n"));
+        }
+
+        if let Some(ref output) = task.output {
+            if let Some(stdout) = output.get("stdout").and_then(|v| v.as_str())
+                && !stdout.is_empty()
+            {
+                log.push_str("=== STDOUT ===\n");
+                log.push_str(stdout);
+                log.push('\n');
+            }
+            if let Some(stderr) = output.get("stderr").and_then(|v| v.as_str())
+                && !stderr.is_empty()
+            {
+                log.push_str("=== STDERR ===\n");
+                log.push_str(stderr);
+                log.push('\n');
+            }
+        }
+
+        let _ = std::fs::write(flow_dir.join(format!("{}.log", task.id.0)), log);
+    }
+}
+
+/// Print build results to the terminal.
+fn print_build_results(
+    flow_id: &str,
+    build_info: &BuildInfo,
+    flow: &tasked::types::Flow,
+    tasks: &[tasked::types::Task],
+) {
+    use tasked::types::TaskState;
+
+    let state_icon = match flow.state {
+        FlowState::Succeeded => "\x1b[32m✓\x1b[0m",
+        FlowState::Failed => "\x1b[31m✗\x1b[0m",
+        FlowState::Cancelled => "\x1b[33m⊘\x1b[0m",
+        _ => "?",
+    };
+
+    let sha_short = &build_info.sha[..7.min(build_info.sha.len())];
+    println!(
+        "\n{state_icon} \x1b[1m{}\x1b[0m @ {sha_short} ({flow_id})",
+        build_info.repo
+    );
+
+    for task in tasks {
+        let icon = match task.state {
+            TaskState::Succeeded => "\x1b[32m  ✓\x1b[0m",
+            TaskState::Failed => "\x1b[31m  ✗\x1b[0m",
+            TaskState::Cancelled => "\x1b[33m  ⊘\x1b[0m",
+            _ => "  ?",
+        };
+
+        let duration = match (task.started_at, task.completed_at) {
+            (Some(start), Some(end)) => {
+                let secs = (end - start).num_seconds();
+                format!("{secs}s")
+            }
+            _ => "-".to_string(),
+        };
+
+        println!("{icon} {} ({duration})", task.id.0);
+
+        if let Some(ref error) = task.error {
+            println!("    \x1b[31m{error}\x1b[0m");
+        }
+    }
+    println!();
 }

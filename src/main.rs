@@ -110,6 +110,20 @@ enum Commands {
     /// Print the pipeline JSON schema.
     Schema,
 
+    /// View build logs.
+    Logs {
+        /// Flow ID to view logs for. If omitted, lists recent builds.
+        flow_id: Option<String>,
+
+        /// Specific step to view.
+        #[arg(long)]
+        step: Option<String>,
+
+        /// Gauntlet server URL.
+        #[arg(long, default_value = "http://localhost:7711")]
+        server: String,
+    },
+
     /// Run the CI daemon (webhook receiver + optional poller).
     /// Reads defaults from ~/.gauntlet/config.json.
     Serve {
@@ -198,6 +212,14 @@ async fn main() {
         Commands::Validate { file, format } => validate_pipeline(&file, &format),
         Commands::Schema => {
             print_schema();
+            0
+        }
+        Commands::Logs {
+            flow_id,
+            step,
+            server,
+        } => {
+            fetch_logs(&server, flow_id.as_deref(), step.as_deref()).await;
             0
         }
         Commands::Serve {
@@ -578,4 +600,104 @@ fn git_current_sha() -> Result<String, std::io::Error> {
         .args(["rev-parse", "HEAD"])
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn fetch_logs(server: &str, flow_id: Option<&str>, step: Option<&str>) {
+    let client = reqwest::Client::new();
+
+    match (flow_id, step) {
+        (Some(fid), Some(s)) => {
+            // Fetch specific step log.
+            let url = format!("{server}/builds/{fid}/logs/{s}");
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if let Some(stdout) = body.get("stdout").and_then(|v| v.as_str())
+                        && !stdout.is_empty()
+                    {
+                        println!("{stdout}");
+                    }
+                    if let Some(stderr) = body.get("stderr").and_then(|v| v.as_str())
+                        && !stderr.is_empty()
+                    {
+                        eprintln!("{stderr}");
+                    }
+                    if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
+                        eprintln!("\x1b[31mERROR: {error}\x1b[0m");
+                    }
+                }
+                Ok(resp) => eprintln!("error: {}", resp.status()),
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        (Some(fid), None) => {
+            // Fetch all step logs for a build.
+            let url = format!("{server}/builds/{fid}/logs");
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if let Some(tasks) = body.get("tasks").and_then(|v| v.as_array()) {
+                        for task in tasks {
+                            let step_name =
+                                task.get("step").and_then(|v| v.as_str()).unwrap_or("?");
+                            let state = task.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+                            println!("\x1b[1m--- {step_name} ({state}) ---\x1b[0m");
+                            if let Some(stdout) = task.get("stdout").and_then(|v| v.as_str())
+                                && !stdout.is_empty()
+                            {
+                                println!("{stdout}");
+                            }
+                            if let Some(stderr) = task.get("stderr").and_then(|v| v.as_str())
+                                && !stderr.is_empty()
+                            {
+                                eprintln!("{stderr}");
+                            }
+                            if let Some(error) = task.get("error").and_then(|v| v.as_str()) {
+                                eprintln!("\x1b[31mERROR: {error}\x1b[0m");
+                            }
+                        }
+                    }
+                }
+                Ok(resp) => eprintln!("error: {}", resp.status()),
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        (None, _) => {
+            // List recent builds from status endpoint.
+            let url = format!("{server}/status");
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+
+                    // Also list disk logs.
+                    let logs_dir = dirs::home_dir().unwrap_or_default().join(".gauntlet/logs");
+                    if logs_dir.exists() {
+                        println!("\nRecent builds (on disk):");
+                        let mut entries: Vec<_> = std::fs::read_dir(&logs_dir)
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .collect();
+                        entries.sort_by_key(|e| {
+                            std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok()))
+                        });
+                        for entry in entries.iter().take(10) {
+                            let name = entry.file_name();
+                            let summary_path = entry.path().join("summary.txt");
+                            let summary =
+                                std::fs::read_to_string(&summary_path).unwrap_or_default();
+                            let first_line = summary.lines().next().unwrap_or("");
+                            println!("  {} — {first_line}", name.to_string_lossy());
+                        }
+                    }
+                }
+                Ok(resp) => eprintln!("error: {}", resp.status()),
+                Err(e) => eprintln!("error: {e} (is gauntlet serve running?)"),
+            }
+        }
+    }
 }
