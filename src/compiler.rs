@@ -7,7 +7,7 @@ use crate::artifacts;
 use crate::cache;
 use crate::checkout::{self, CHECKOUT_TASK_ID};
 use crate::matrix;
-use crate::schema::{ArtifactConfig, ArtifactSetting, MatrixSetting, Pipeline, Step};
+use crate::schema::{ArtifactConfig, ArtifactSetting, MatrixSetting, Pipeline, RunnerConfig, Step};
 
 #[derive(Debug, Error)]
 pub enum CompileError {
@@ -355,8 +355,12 @@ fn build_task_defs(
             task_defs.push(download_def);
         }
 
+        // Resolve effective runner: step-level overrides pipeline-level.
+        let effective_runner = step.runner.as_ref().or(pipeline.runner.as_ref());
+
         // Pass 6: Shorthand expansion + env merge.
-        let (executor, config) = expand_executor(step, &ex.matrix_combo, &pipeline.env, ctx);
+        let (executor, config) =
+            expand_executor(step, &ex.matrix_combo, &pipeline.env, ctx, effective_runner);
 
         // Build the main TaskDef.
         let task_def = TaskDef {
@@ -398,6 +402,7 @@ fn expand_executor(
     matrix_combo: &Option<HashMap<String, String>>,
     global_env: &HashMap<String, String>,
     ctx: &BuildContext,
+    runner: Option<&RunnerConfig>,
 ) -> (String, serde_json::Value) {
     // Merge env: global -> step -> matrix -> ctx overrides.
     let mut env = global_env.clone();
@@ -430,22 +435,55 @@ fn expand_executor(
         None
     };
 
+    // Substitute matrix variables in command.
+    let shell_body = shell_body.map(|mut body| {
+        if let Some(combo) = matrix_combo {
+            for (k, v) in combo {
+                body = body.replace(&format!("${{{k}}}"), v);
+                body = body.replace(&format!("${{matrix.{k}}}"), v);
+                body = body.replace("${matrix}", v);
+            }
+        }
+        body
+    });
+
+    // Explicit container step (overrides runner).
     if let Some(ref container) = step.container {
-        // Container step — command may be provided alongside.
         let cmd = shell_body.unwrap_or_default();
+        let full_cmd = format!("{env_prefix}set -euo pipefail\n{cmd}");
         let config = serde_json::json!({
             "image": container.image,
-            "command": cmd,
+            "command": ["sh", "-c", full_cmd],
             "env": env,
             "working_dir": container.working_dir,
         });
-        ("container".to_string(), config)
-    } else if let Some(body) = shell_body {
+        return ("container".to_string(), config);
+    }
+
+    // Shell command — may be wrapped in a Docker container via runner.
+    if let Some(body) = shell_body {
         let full_command = format!("{env_prefix}set -euo pipefail\n{body}");
+
+        // Check if the runner specifies a Docker image.
+        let docker_image = runner.and_then(|r| r.docker_image());
+
+        if let Some(image) = docker_image {
+            // Wrap in container executor with cache volume mounts.
+            let config = serde_json::json!({
+                "image": image,
+                "command": ["sh", "-c", full_command],
+                "env": env,
+            });
+            return ("container".to_string(), config);
+        }
+
+        // No runner or host runner — run directly in shell.
         let executor_name = if step.spawn { "spawn" } else { "shell" };
         let config = serde_json::json!({ "command": full_command });
-        (executor_name.to_string(), config)
-    } else if let Some(ref block_msg) = step.block {
+        return (executor_name.to_string(), config);
+    }
+
+    if let Some(ref block_msg) = step.block {
         let config = serde_json::json!({ "message": block_msg });
         ("approval".to_string(), config)
     } else if let Some(ref trigger) = step.trigger {
@@ -458,7 +496,6 @@ fn expand_executor(
         let config = step.config.clone().unwrap_or(serde_json::Value::Null);
         (executor.clone(), config)
     } else {
-        // Shouldn't reach here after validation.
         ("noop".to_string(), serde_json::json!({}))
     }
 }
@@ -843,5 +880,62 @@ mod tests {
         assert_eq!(result.flow_def.tasks[0].timeout_secs, Some(60));
         assert_eq!(result.queue_config.max_retries, 1);
         assert_eq!(result.queue_config.timeout_secs, 300);
+    }
+
+    #[test]
+    fn compile_runner_wraps_in_container() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "runner": "rust:latest",
+                "steps": [
+                    {"key": "test", "command": "cargo test"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        // Should compile to container executor, not shell.
+        assert_eq!(result.flow_def.tasks[0].executor, "container");
+        assert_eq!(result.flow_def.tasks[0].config["image"], "rust:latest");
+    }
+
+    #[test]
+    fn compile_step_runner_overrides_pipeline() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "runner": "rust:latest",
+                "steps": [
+                    {"key": "test", "command": "cargo test"},
+                    {"key": "lint", "command": "npm run lint", "runner": "node:20"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].config["image"], "rust:latest");
+        assert_eq!(result.flow_def.tasks[1].config["image"], "node:20");
+    }
+
+    #[test]
+    fn compile_host_runner_uses_shell() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "runner": "rust:latest",
+                "steps": [
+                    {"key": "test", "command": "cargo test"},
+                    {"key": "local", "command": "echo hi", "runner": "host"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].executor, "container");
+        assert_eq!(result.flow_def.tasks[1].executor, "shell");
     }
 }

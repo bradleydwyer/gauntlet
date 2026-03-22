@@ -31,6 +31,10 @@ pub struct Pipeline {
     /// Global timeout in seconds (overridable per-step).
     #[serde(alias = "timeout_secs", default)]
     pub timeout: Option<u64>,
+
+    /// Default runner for all steps. Steps without their own `runner` inherit this.
+    #[serde(default)]
+    pub runner: Option<RunnerConfig>,
 }
 
 fn default_checkout() -> CheckoutSetting {
@@ -152,6 +156,10 @@ pub struct Step {
     #[serde(default)]
     pub soft_fail: bool,
 
+    /// Runner for this step (overrides pipeline-level default).
+    #[serde(default)]
+    pub runner: Option<RunnerConfig>,
+
     /// Matrix expansion.
     #[serde(default)]
     pub matrix: Option<MatrixSetting>,
@@ -236,6 +244,75 @@ pub struct ArtifactConfig {
     pub upload: Vec<String>,
     #[serde(default)]
     pub download_from: Vec<String>,
+}
+
+/// Runner configuration — determines where a step executes.
+///
+/// Can be a simple string (Docker image name) or an object for more control.
+/// - `"runner": "rust:latest"` — Docker container with this image
+/// - `"runner": {"image": "rust:latest"}` — same, explicit form
+/// - `"runner": {"type": "tart", "vm": "sonoma-base"}` — Tart VM
+/// - `"runner": "host"` — run directly on the host (no isolation)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunnerConfig {
+    /// Short form: just a Docker image name, or "host" for no container.
+    Image(String),
+    /// Full form with explicit type and options.
+    Full(RunnerSpec),
+}
+
+/// Full runner specification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerSpec {
+    /// Runner type: "docker" (default), "tart", "host".
+    #[serde(rename = "type", default = "default_runner_type")]
+    pub runner_type: String,
+    /// Docker image (for docker runner).
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Tart VM name (for tart runner).
+    #[serde(default)]
+    pub vm: Option<String>,
+}
+
+fn default_runner_type() -> String {
+    "docker".to_string()
+}
+
+impl RunnerConfig {
+    /// Get the effective Docker image, if this is a Docker runner.
+    pub fn docker_image(&self) -> Option<&str> {
+        match self {
+            Self::Image(s) if s != "host" => Some(s),
+            Self::Full(spec) if spec.runner_type == "docker" => spec.image.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Is this a host runner (no container)?
+    pub fn is_host(&self) -> bool {
+        match self {
+            Self::Image(s) => s == "host",
+            Self::Full(spec) => spec.runner_type == "host",
+        }
+    }
+
+    /// Is this a Tart VM runner?
+    pub fn is_tart(&self) -> bool {
+        match self {
+            Self::Image(_) => false,
+            Self::Full(spec) => spec.runner_type == "tart",
+        }
+    }
+
+    /// Get the Tart VM name, if this is a Tart runner.
+    pub fn tart_vm(&self) -> Option<&str> {
+        match self {
+            Self::Full(spec) if spec.runner_type == "tart" => spec.vm.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Container step configuration.
