@@ -76,6 +76,7 @@ impl Converter for GitHubActionsConverter {
             retry: None,
             timeout: None,
             runner: None,
+            defs: Default::default(),
         })
     }
 }

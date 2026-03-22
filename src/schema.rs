@@ -35,6 +35,10 @@ pub struct Pipeline {
     /// Default runner for all steps. Steps without their own `runner` inherit this.
     #[serde(default)]
     pub runner: Option<RunnerConfig>,
+
+    /// Reusable step definitions. Steps reference them with `use`.
+    #[serde(default)]
+    pub defs: HashMap<String, StepDef>,
 }
 
 fn default_checkout() -> CheckoutSetting {
@@ -130,6 +134,10 @@ pub struct Step {
     /// Raw tasked executor config (used with `executor`).
     #[serde(default)]
     pub config: Option<serde_json::Value>,
+
+    /// Inherit fields from a named definition.
+    #[serde(rename = "use", default)]
+    pub use_def: Option<String>,
 
     // ── Common fields ──
     /// Step dependencies.
@@ -274,6 +282,9 @@ pub struct RunnerSpec {
     /// Tart VM name (for tart runner).
     #[serde(default)]
     pub vm: Option<String>,
+    /// Commands to run before every step in this runner.
+    #[serde(default)]
+    pub setup: Option<String>,
 }
 
 fn default_runner_type() -> String {
@@ -313,6 +324,35 @@ impl RunnerConfig {
             _ => None,
         }
     }
+
+    /// Get the setup commands, if any.
+    pub fn setup(&self) -> Option<&str> {
+        match self {
+            Self::Full(spec) => spec.setup.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Reusable step definition. Steps reference these with `use`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StepDef {
+    #[serde(default)]
+    pub runner: Option<RunnerConfig>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub retry: Option<u32>,
+    #[serde(default)]
+    pub soft_fail: bool,
+    #[serde(rename = "if", default)]
+    pub condition: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub commands: Option<Vec<String>>,
 }
 
 /// Container step configuration.

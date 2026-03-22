@@ -29,6 +29,9 @@ pub enum CompileError {
 
     #[error("duplicate step key '{0}'")]
     DuplicateTaskId(String),
+
+    #[error("step '{0}' references unknown definition '{1}'")]
+    UnknownDef(String, String),
 }
 
 /// Build context provided by the CLI / webhook receiver.
@@ -55,6 +58,7 @@ pub struct CompileMetadata {
 }
 
 /// Result of compiling a Pipeline into a Tasked FlowDef.
+#[derive(Debug)]
 pub struct CompileResult {
     pub flow_def: FlowDef,
     pub queue_config: QueueConfig,
@@ -71,6 +75,10 @@ pub fn compile(pipeline: &Pipeline, ctx: &BuildContext) -> Result<CompileResult,
         matrix_values: HashMap::new(),
         synthetic_tasks: HashSet::new(),
     };
+
+    // Pass 0: Resolve `use` references — merge def fields into steps.
+    let resolved_pipeline = resolve_defs(pipeline)?;
+    let pipeline = &resolved_pipeline;
 
     // Pass 1: Validate
     validate(pipeline)?;
@@ -94,6 +102,68 @@ pub fn compile(pipeline: &Pipeline, ctx: &BuildContext) -> Result<CompileResult,
         queue_config,
         metadata,
     })
+}
+
+/// Pass 0: Resolve `use` references by merging definition fields into steps.
+fn resolve_defs(pipeline: &Pipeline) -> Result<Pipeline, CompileError> {
+    // Check if any step uses a def — skip if none do.
+    let has_use = pipeline.steps.iter().any(|s| s.use_def.is_some());
+    if !has_use {
+        return Ok(pipeline.clone());
+    }
+
+    let mut resolved = pipeline.clone();
+    for (i, step) in resolved.steps.iter_mut().enumerate() {
+        let def_name = match &step.use_def {
+            Some(name) => name.clone(),
+            None => continue,
+        };
+
+        let def = pipeline.defs.get(&def_name).ok_or_else(|| {
+            let key = step.key.clone().unwrap_or_else(|| format!("step-{i}"));
+            CompileError::UnknownDef(key, def_name.clone())
+        })?;
+
+        // Merge: step fields override def fields.
+        if step.runner.is_none() {
+            step.runner = def.runner.clone();
+        }
+        if step.timeout.is_none() {
+            step.timeout = def.timeout;
+        }
+        if step.retry.is_none() {
+            step.retry = def.retry;
+        }
+        if !step.soft_fail && def.soft_fail {
+            step.soft_fail = true;
+        }
+        if step.command.is_none() {
+            step.command = def.command.clone();
+        }
+        if step.commands.is_none() {
+            step.commands = def.commands.clone();
+        }
+
+        // Env: def is base, step merges on top.
+        if !def.env.is_empty() {
+            let mut merged = def.env.clone();
+            merged.extend(step.env.clone());
+            step.env = merged;
+        }
+
+        // Conditions: AND together.
+        match (&def.condition, &step.condition) {
+            (Some(def_cond), Some(step_cond)) => {
+                step.condition = Some(format!("({def_cond}) && ({step_cond})"));
+            }
+            (Some(def_cond), None) => {
+                step.condition = Some(def_cond.clone());
+            }
+            _ => {} // Step condition only, or neither.
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// Get the effective ID for a step (key or auto-generated).
@@ -510,7 +580,15 @@ fn expand_executor(
                 String::new()
             };
 
-            let container_command = format!("{git_setup}{full_command}");
+            // Prepend setup commands from the runner config.
+            let setup = runner.and_then(|r| r.setup()).unwrap_or("");
+            let setup_prefix = if setup.is_empty() {
+                String::new()
+            } else {
+                format!("{setup}\n")
+            };
+
+            let container_command = format!("{git_setup}{setup_prefix}{full_command}");
 
             let config = serde_json::json!({
                 "image": image,
@@ -989,5 +1067,147 @@ mod tests {
         let result = compile(&pipeline, &ctx).unwrap();
         assert_eq!(result.flow_def.tasks[0].executor, "container");
         assert_eq!(result.flow_def.tasks[1].executor, "shell");
+    }
+
+    #[test]
+    fn compile_use_def() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "defs": {
+                    "rust": {
+                        "runner": "rust:latest",
+                        "timeout": 600
+                    }
+                },
+                "steps": [
+                    {"key": "test", "use": "rust", "command": "cargo test"},
+                    {"key": "check", "use": "rust", "command": "cargo check"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].executor, "container");
+        assert_eq!(result.flow_def.tasks[0].config["image"], "rust:latest");
+        assert_eq!(result.flow_def.tasks[0].timeout_secs, Some(600));
+        assert_eq!(result.flow_def.tasks[1].executor, "container");
+        assert_eq!(result.flow_def.tasks[1].timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn compile_def_env_merge() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "defs": {
+                    "base": {
+                        "env": {"FROM_DEF": "1", "SHARED": "def"}
+                    }
+                },
+                "steps": [
+                    {"key": "test", "use": "base", "command": "echo", "env": {"FROM_STEP": "2", "SHARED": "step"}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        let cmd = result.flow_def.tasks[0].config["command"].as_str().unwrap();
+        assert!(cmd.contains("FROM_DEF"));
+        assert!(cmd.contains("FROM_STEP"));
+        // Step value should override def value.
+        assert!(cmd.contains("SHARED=\"step\""));
+    }
+
+    #[test]
+    fn compile_def_condition_and() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "defs": {
+                    "main_only": {
+                        "if": "branch == 'main'"
+                    }
+                },
+                "steps": [
+                    {"key": "deploy", "use": "main_only", "command": "echo deploy", "if": "event == 'push'"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        // Check that the resolved condition has both parts.
+        let resolved = resolve_defs(&pipeline).unwrap();
+        let cond = resolved.steps[0].condition.as_deref().unwrap();
+        assert!(cond.contains("branch == 'main'"));
+        assert!(cond.contains("event == 'push'"));
+    }
+
+    #[test]
+    fn compile_def_step_overrides() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "defs": {
+                    "base": {
+                        "timeout": 600,
+                        "retry": 3
+                    }
+                },
+                "steps": [
+                    {"key": "test", "use": "base", "command": "echo", "timeout": 30}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        // Step timeout overrides def.
+        assert_eq!(result.flow_def.tasks[0].timeout_secs, Some(30));
+        // Retry inherited from def.
+        assert_eq!(result.flow_def.tasks[0].retries, Some(3));
+    }
+
+    #[test]
+    fn compile_unknown_def_error() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "steps": [
+                    {"key": "test", "use": "nonexistent", "command": "echo"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let err = compile(&pipeline, &ctx).unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn compile_setup_prepended() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "runner": {"image": "rust:latest", "setup": "rustup component add clippy"},
+                "steps": [
+                    {"key": "clippy", "command": "cargo clippy"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        let cmd = result.flow_def.tasks[0].config["command"]
+            .as_array()
+            .unwrap();
+        let shell_cmd = cmd[2].as_str().unwrap();
+        assert!(shell_cmd.contains("rustup component add clippy"));
+        assert!(shell_cmd.contains("cargo clippy"));
+        // Setup should come before the main command.
+        let setup_pos = shell_cmd.find("rustup component add clippy").unwrap();
+        let cmd_pos = shell_cmd.find("cargo clippy").unwrap();
+        assert!(setup_pos < cmd_pos);
     }
 }
