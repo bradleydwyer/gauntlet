@@ -7,6 +7,7 @@ pub mod github;
 pub mod github_app;
 pub mod matrix;
 pub mod schema;
+pub mod serve;
 pub mod tui;
 pub mod webhook;
 pub mod workspace;

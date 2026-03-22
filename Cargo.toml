@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 tasked = { path = "../tasked/tasked", features = ["docker"] }
+axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 jsonwebtoken = "9"
 reqwest = { version = "0.12", features = ["json"] }
@@ -19,6 +20,7 @@ serde_json = "1"
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+shellexpand = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

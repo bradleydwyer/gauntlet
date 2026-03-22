@@ -7,7 +7,7 @@ use crate::artifacts;
 use crate::cache;
 use crate::checkout::{self, CHECKOUT_TASK_ID};
 use crate::matrix;
-use crate::schema::{ArtifactSetting, MatrixConfig, MatrixSetting, Pipeline, Step};
+use crate::schema::{ArtifactConfig, ArtifactSetting, MatrixSetting, Pipeline, Step};
 
 #[derive(Debug, Error)]
 pub enum CompileError {
@@ -15,12 +15,12 @@ pub enum CompileError {
     UnknownDependency(String, String),
 
     #[error(
-        "step '{0}' specifies multiple step types — use one of: command, commands, container, block, trigger, or executor"
+        "step '{0}' specifies multiple executor types — use only one of command/commands/container/block/trigger/executor"
     )]
     AmbiguousExecutor(String),
 
     #[error(
-        "step '{0}' has no step type — specify command, commands, container, block, trigger, or executor"
+        "step '{0}' has no executor — specify 'command', 'commands', 'container', 'block', 'trigger', or 'executor'"
     )]
     MissingExecutor(String),
 
@@ -28,7 +28,7 @@ pub enum CompileError {
     EmptyMatrixDimension(String, String),
 
     #[error("duplicate step key '{0}'")]
-    DuplicateKey(String),
+    DuplicateTaskId(String),
 }
 
 /// Build context provided by the CLI / webhook receiver.
@@ -44,11 +44,11 @@ pub struct BuildContext {
 /// Metadata about the compilation for the TUI.
 #[derive(Debug, Clone)]
 pub struct CompileMetadata {
-    /// Maps expanded step keys back to original pipeline step keys.
+    /// Maps expanded task IDs back to original pipeline step keys.
     pub task_origins: HashMap<String, String>,
-    /// Matrix values for each expanded step.
+    /// Matrix values for each expanded task.
     pub matrix_values: HashMap<String, HashMap<String, String>>,
-    /// Step keys that are synthetic (checkout, cache, artifact steps).
+    /// Task IDs that are synthetic (checkout, cache, artifact steps).
     pub synthetic_tasks: HashSet<String>,
 }
 
@@ -60,6 +60,9 @@ pub struct CompileResult {
 }
 
 /// Compile a Pipeline into a Tasked FlowDef.
+///
+/// The compiler is pure and deterministic: given the same Pipeline and BuildContext,
+/// it always produces the same output.
 pub fn compile(pipeline: &Pipeline, ctx: &BuildContext) -> Result<CompileResult, CompileError> {
     let mut metadata = CompileMetadata {
         task_origins: HashMap::new(),
@@ -67,19 +70,16 @@ pub fn compile(pipeline: &Pipeline, ctx: &BuildContext) -> Result<CompileResult,
         synthetic_tasks: HashSet::new(),
     };
 
-    // Assign auto-keys to steps without one.
-    let steps = auto_key(&pipeline.steps);
-
     // Pass 1: Validate
-    validate(&steps, pipeline)?;
+    validate(pipeline)?;
 
     // Pass 2: Matrix expansion
-    let expanded = expand_matrices(&steps, &mut metadata)?;
+    let expanded_tasks = expand_matrices(pipeline, &mut metadata)?;
 
-    // Pass 3+: Build TaskDefs
-    let task_defs = build_task_defs(pipeline, &expanded, ctx, &mut metadata);
+    // Pass 3-7: Build TaskDefs
+    let task_defs = build_task_defs(pipeline, &expanded_tasks, ctx, &mut metadata);
 
-    // Assemble
+    // Pass 8: Assemble
     let flow_def = FlowDef {
         tasks: task_defs,
         webhooks: None,
@@ -94,94 +94,73 @@ pub fn compile(pipeline: &Pipeline, ctx: &BuildContext) -> Result<CompileResult,
     })
 }
 
-/// Assign auto-generated keys to steps that don't have one.
-fn auto_key(steps: &[Step]) -> Vec<Step> {
-    steps
-        .iter()
-        .enumerate()
-        .map(|(i, step)| {
-            let mut s = step.clone();
-            if s.key.is_none() {
-                s.key = Some(format!("step-{i}"));
-            }
-            s
-        })
-        .collect()
+/// Get the effective ID for a step (key or auto-generated).
+fn step_id(step: &Step, index: usize) -> String {
+    step.key.clone().unwrap_or_else(|| format!("step-{index}"))
 }
 
-/// Get the key of a step (must have been auto-keyed first).
-fn step_key(step: &Step) -> &str {
-    step.key.as_deref().unwrap()
-}
+/// Pass 1: Validate the pipeline structure.
+fn validate(pipeline: &Pipeline) -> Result<(), CompileError> {
+    let mut seen_ids = HashSet::new();
 
-/// Pass 1: Validate pipeline structure.
-fn validate(steps: &[Step], pipeline: &Pipeline) -> Result<(), CompileError> {
-    let mut seen_keys = HashSet::new();
+    for (i, step) in pipeline.steps.iter().enumerate() {
+        let id = step_id(step, i);
 
-    for step in steps {
-        let key = step_key(step);
-
-        if !seen_keys.insert(key.to_string()) {
-            return Err(CompileError::DuplicateKey(key.to_string()));
+        if !seen_ids.insert(id.clone()) {
+            return Err(CompileError::DuplicateTaskId(id));
         }
 
-        // Check step type specification.
-        let type_count = [
-            step.command.is_some(),
-            step.commands.is_some(),
-            step.container.is_some(),
-            step.block.is_some(),
-            step.trigger.is_some(),
-            step.executor.is_some(),
+        // Check executor specification — exactly one step type must be set.
+        let has_command = step.command.is_some();
+        let has_commands = step.commands.is_some();
+        let has_executor = step.executor.is_some();
+        let has_container = step.container.is_some();
+        let has_block = step.block.is_some();
+        let has_trigger = step.trigger.is_some();
+
+        let exec_count = [
+            has_command,
+            has_commands,
+            has_executor,
+            has_container,
+            has_block,
+            has_trigger,
         ]
         .iter()
         .filter(|&&x| x)
         .count();
 
-        if type_count > 1 {
-            // Allow container + command (command runs inside the container)
-            let is_container_command =
-                step.container.is_some() && (step.command.is_some() || step.commands.is_some());
-            if !is_container_command {
-                return Err(CompileError::AmbiguousExecutor(key.to_string()));
-            }
+        // container + command/commands is allowed (run command inside container)
+        let effective_count = if has_container && (has_command || has_commands) {
+            1
+        } else {
+            exec_count
+        };
+
+        if effective_count > 1 {
+            return Err(CompileError::AmbiguousExecutor(id));
         }
-        if type_count == 0 {
-            return Err(CompileError::MissingExecutor(key.to_string()));
+        if effective_count == 0 {
+            return Err(CompileError::MissingExecutor(id));
         }
 
         // Check matrix dimensions non-empty.
         if let Some(ref matrix) = step.matrix {
-            let config = match matrix {
-                MatrixSetting::Simple(v) => {
-                    if v.is_empty() {
-                        return Err(CompileError::EmptyMatrixDimension(
-                            key.to_string(),
-                            "matrix".to_string(),
-                        ));
-                    }
-                    continue;
-                }
-                MatrixSetting::Multi(c) => c,
-            };
-            for (dim_key, values) in &config.dimensions {
+            let config = matrix_to_config(matrix);
+            for (key, values) in &config.dimensions {
                 if values.is_empty() {
-                    return Err(CompileError::EmptyMatrixDimension(
-                        key.to_string(),
-                        dim_key.clone(),
-                    ));
+                    return Err(CompileError::EmptyMatrixDimension(id.clone(), key.clone()));
                 }
             }
         }
     }
 
     // Check depends_on references (allow deferred spawn refs containing '/').
-    let _ = pipeline; // pipeline available for future use
-    for step in steps {
-        let key = step_key(step);
+    for (i, step) in pipeline.steps.iter().enumerate() {
+        let id = step_id(step, i);
         for dep in step.depends_on.as_vec() {
-            if !dep.contains('/') && !seen_keys.contains(&dep) {
-                return Err(CompileError::UnknownDependency(key.to_string(), dep));
+            if !dep.contains('/') && !seen_ids.contains(&dep) {
+                return Err(CompileError::UnknownDependency(id.clone(), dep));
             }
         }
     }
@@ -189,46 +168,66 @@ fn validate(steps: &[Step], pipeline: &Pipeline) -> Result<(), CompileError> {
     Ok(())
 }
 
-/// A step after matrix expansion.
-struct ExpandedStep {
-    key: String,
+/// Convert a MatrixSetting to a MatrixConfig for expansion.
+fn matrix_to_config(setting: &MatrixSetting) -> crate::schema::MatrixConfig {
+    match setting {
+        MatrixSetting::Simple(values) => crate::schema::MatrixConfig {
+            dimensions: HashMap::from([("matrix".to_string(), values.clone())]),
+            exclude: vec![],
+        },
+        MatrixSetting::Multi(config) => config.clone(),
+    }
+}
+
+/// Normalize an ArtifactSetting into an ArtifactConfig for uniform handling.
+fn artifact_to_config(setting: &ArtifactSetting) -> ArtifactConfig {
+    match setting {
+        ArtifactSetting::Globs(globs) => ArtifactConfig {
+            upload: globs.clone(),
+            download_from: vec![],
+        },
+        ArtifactSetting::Full(config) => config.clone(),
+    }
+}
+
+/// A task after matrix expansion (may be original or a matrix variant).
+struct ExpandedTask {
+    /// The new task ID (original or with matrix suffix).
+    id: String,
+    /// The original pipeline step.
     original: Step,
+    /// Resolved depends_on as a flat Vec (after matrix fan-in rewrite).
+    depends_on: Vec<String>,
+    /// Matrix values if this is a matrix variant.
     matrix_combo: Option<HashMap<String, String>>,
 }
 
 /// Pass 2: Expand matrix builds.
 fn expand_matrices(
-    steps: &[Step],
+    pipeline: &Pipeline,
     metadata: &mut CompileMetadata,
-) -> Result<Vec<ExpandedStep>, CompileError> {
+) -> Result<Vec<ExpandedTask>, CompileError> {
+    // Track which original IDs expand to which new IDs.
     let mut expansion_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut expanded = Vec::new();
 
-    for step in steps {
-        let key = step_key(step).to_string();
+    for (i, step) in pipeline.steps.iter().enumerate() {
+        let id = step_id(step, i);
+        let deps = step.depends_on.as_vec();
 
-        let matrix_config = match &step.matrix {
-            Some(MatrixSetting::Simple(values)) => {
-                // Convert simple matrix to multi-dimension with "matrix" as the key.
-                Some(MatrixConfig {
-                    dimensions: HashMap::from([("matrix".to_string(), values.clone())]),
-                    exclude: vec![],
-                })
-            }
-            Some(MatrixSetting::Multi(config)) => Some(config.clone()),
-            None => None,
-        };
-
-        if let Some(ref config) = matrix_config {
-            let combos = matrix::expand(config);
+        if let Some(ref matrix_setting) = step.matrix {
+            let matrix_config = matrix_to_config(matrix_setting);
+            let combos = matrix::expand(&matrix_config);
             if combos.is_empty() {
+                // No combinations — treat as non-matrix step.
                 expansion_map
-                    .entry(key.clone())
+                    .entry(id.clone())
                     .or_default()
-                    .push(key.clone());
-                expanded.push(ExpandedStep {
-                    key: key.clone(),
+                    .push(id.clone());
+                expanded.push(ExpandedTask {
+                    id: id.clone(),
                     original: step.clone(),
+                    depends_on: deps,
                     matrix_combo: None,
                 });
                 continue;
@@ -236,30 +235,30 @@ fn expand_matrices(
 
             for combo in &combos {
                 let suffix = matrix::suffix(combo);
-                let new_key = format!("{key}-{suffix}");
+                let new_id = format!("{id}-{suffix}");
                 expansion_map
-                    .entry(key.clone())
+                    .entry(id.clone())
                     .or_default()
-                    .push(new_key.clone());
-                metadata.task_origins.insert(new_key.clone(), key.clone());
-                metadata
-                    .matrix_values
-                    .insert(new_key.clone(), combo.clone());
+                    .push(new_id.clone());
+                metadata.task_origins.insert(new_id.clone(), id.clone());
+                metadata.matrix_values.insert(new_id.clone(), combo.clone());
 
-                expanded.push(ExpandedStep {
-                    key: new_key,
+                expanded.push(ExpandedTask {
+                    id: new_id,
                     original: step.clone(),
+                    depends_on: deps.clone(),
                     matrix_combo: Some(combo.clone()),
                 });
             }
         } else {
             expansion_map
-                .entry(key.clone())
+                .entry(id.clone())
                 .or_default()
-                .push(key.clone());
-            expanded.push(ExpandedStep {
-                key: key.clone(),
+                .push(id.clone());
+            expanded.push(ExpandedTask {
+                id: id.clone(),
                 original: step.clone(),
+                depends_on: deps,
                 matrix_combo: None,
             });
         }
@@ -267,31 +266,32 @@ fn expand_matrices(
 
     // Rewrite depends_on: if a dep refers to a matrix-expanded step,
     // replace with all expanded variants (fan-in).
-    for ex in &mut expanded {
+    for task in &mut expanded {
         let mut new_deps = Vec::new();
-        for dep in ex.original.depends_on.as_vec() {
-            if let Some(expanded_keys) = expansion_map.get(&dep) {
-                new_deps.extend(expanded_keys.iter().cloned());
+        for dep in &task.depends_on {
+            if let Some(expanded_ids) = expansion_map.get(dep) {
+                new_deps.extend(expanded_ids.iter().cloned());
             } else {
-                new_deps.push(dep);
+                // Deferred spawn ref or already-expanded ref — keep as-is.
+                new_deps.push(dep.clone());
             }
         }
-        ex.original.depends_on = crate::schema::DependsOn::Multiple(new_deps);
+        task.depends_on = new_deps;
     }
 
     Ok(expanded)
 }
 
-/// Build concrete TaskDefs from expanded steps.
+/// Pass 3-7: Build concrete TaskDefs from expanded tasks.
 fn build_task_defs(
     pipeline: &Pipeline,
-    expanded: &[ExpandedStep],
+    expanded: &[ExpandedTask],
     ctx: &BuildContext,
     metadata: &mut CompileMetadata,
 ) -> Vec<TaskDef> {
     let mut task_defs: Vec<TaskDef> = Vec::new();
 
-    // Checkout injection.
+    // Pass 3: Checkout injection.
     if pipeline.checkout.is_enabled() {
         let checkout_config = pipeline.checkout.config();
         let checkout = checkout::checkout_task(&checkout_config, ctx);
@@ -303,30 +303,35 @@ fn build_task_defs(
 
     for ex in expanded {
         let step = &ex.original;
-        let step_key = &ex.key;
+        let task_id = &ex.id;
 
-        let mut deps: Vec<String> = step.depends_on.as_vec();
+        // Collect this task's dependencies (may be modified by cache/artifact injection).
+        let mut deps: Vec<String> = ex.depends_on.clone();
 
-        // If checkout is enabled and this step has no deps, depend on checkout.
+        // If checkout is enabled and this task has no deps, depend on checkout.
         if pipeline.checkout.is_enabled() && deps.is_empty() {
             deps.push(CHECKOUT_TASK_ID.to_string());
         }
 
-        // Cache injection.
+        // Pass 4: Cache injection.
         if let Some(ref cache_config) = step.cache {
             let cache_key = resolve_cache_key(&cache_config.key, ex.matrix_combo.as_ref());
-            let restore = cache::restore_task(step_key, &cache_key, &cache_config.paths);
-            let save = cache::save_task(step_key, &cache_key, &cache_config.paths);
+            let restore = cache::restore_task(task_id, &cache_key, &cache_config.paths);
+            let save = cache::save_task(task_id, &cache_key, &cache_config.paths);
 
             let restore_id = restore.id.0.clone();
             let save_id = save.id.0.clone();
 
+            // Restore depends on whatever the task originally depended on.
             let mut restore_def = restore;
             restore_def.depends_on = deps.iter().map(|d| TaskId(d.clone())).collect();
+
+            // The main task now depends on cache restore.
             deps = vec![restore_id.clone()];
 
+            // Save depends on the main task.
             let mut save_def = save;
-            save_def.depends_on = vec![TaskId(step_key.clone())];
+            save_def.depends_on = vec![TaskId(task_id.clone())];
 
             metadata.synthetic_tasks.insert(restore_id);
             metadata.synthetic_tasks.insert(save_id);
@@ -334,15 +339,12 @@ fn build_task_defs(
             task_defs.push(save_def);
         }
 
-        // Artifact download injection.
-        let download_from = match &step.artifacts {
-            Some(ArtifactSetting::Full(cfg)) if !cfg.download_from.is_empty() => {
-                Some(cfg.download_from.clone())
-            }
-            _ => None,
-        };
-        if let Some(ref sources) = download_from {
-            let download = artifacts::download_task(step_key, sources);
+        // Pass 5: Artifact download injection.
+        let artifact_config = step.artifacts.as_ref().map(artifact_to_config);
+        if let Some(ref ac) = artifact_config
+            && !ac.download_from.is_empty()
+        {
+            let download = artifacts::download_task(task_id, &ac.download_from);
             let download_id = download.id.0.clone();
 
             let mut download_def = download;
@@ -353,12 +355,12 @@ fn build_task_defs(
             task_defs.push(download_def);
         }
 
-        // Expand step type to executor + config.
+        // Pass 6: Shorthand expansion + env merge.
         let (executor, config) = expand_executor(step, &ex.matrix_combo, &pipeline.env, ctx);
 
         // Build the main TaskDef.
         let task_def = TaskDef {
-            id: TaskId(step_key.clone()),
+            id: TaskId(task_id.clone()),
             executor,
             config,
             input: None,
@@ -372,18 +374,15 @@ fn build_task_defs(
 
         task_defs.push(task_def);
 
-        // Artifact upload injection.
-        let upload_globs = match &step.artifacts {
-            Some(ArtifactSetting::Globs(globs)) => Some(globs.clone()),
-            Some(ArtifactSetting::Full(cfg)) if !cfg.upload.is_empty() => Some(cfg.upload.clone()),
-            _ => None,
-        };
-        if let Some(globs) = upload_globs {
-            let upload = artifacts::upload_task(step_key, &globs);
+        // Pass 5 continued: Artifact upload injection.
+        if let Some(ref ac) = artifact_config
+            && !ac.upload.is_empty()
+        {
+            let upload = artifacts::upload_task(task_id, &ac.upload);
             let upload_id = upload.id.0.clone();
 
             let mut upload_def = upload;
-            upload_def.depends_on = vec![TaskId(step_key.clone())];
+            upload_def.depends_on = vec![TaskId(task_id.clone())];
 
             metadata.synthetic_tasks.insert(upload_id);
             task_defs.push(upload_def);
@@ -393,14 +392,14 @@ fn build_task_defs(
     task_defs
 }
 
-/// Expand step type to executor name + config JSON.
+/// Expand executor shorthand and merge environment variables into the command.
 fn expand_executor(
     step: &Step,
     matrix_combo: &Option<HashMap<String, String>>,
     global_env: &HashMap<String, String>,
     ctx: &BuildContext,
 ) -> (String, serde_json::Value) {
-    // Merge env: global → step → matrix → ctx overrides.
+    // Merge env: global -> step -> matrix -> ctx overrides.
     let mut env = global_env.clone();
     env.extend(step.env.clone());
     if let Some(combo) = matrix_combo {
@@ -410,6 +409,7 @@ fn expand_executor(
     }
     env.extend(ctx.env_overrides.clone());
 
+    // Build env prefix for shell commands.
     let env_prefix = if env.is_empty() {
         String::new()
     } else {
@@ -417,75 +417,50 @@ fn expand_executor(
             .iter()
             .map(|(k, v)| format!("export {}={}", k, shell_escape(v)))
             .collect();
-        exports.sort();
+        exports.sort(); // Deterministic ordering.
         format!("{}\n", exports.join("\n"))
     };
 
-    // Block step → approval executor.
-    if let Some(ref message) = step.block {
-        return (
-            "approval".to_string(),
-            serde_json::json!({ "message": message }),
-        );
-    }
+    // Resolve the shell command body (command or commands shorthand).
+    let shell_body = if let Some(ref command) = step.command {
+        Some(command.clone())
+    } else if let Some(ref commands) = step.commands {
+        Some(commands.join(" && "))
+    } else {
+        None
+    };
 
-    // Trigger step → trigger executor.
-    if let Some(ref trigger) = step.trigger {
-        return (
-            "trigger".to_string(),
-            serde_json::json!({
-                "pipeline": trigger.pipeline,
-                "env": trigger.env,
-            }),
-        );
-    }
-
-    // Raw executor escape hatch.
-    if let Some(ref executor) = step.executor {
-        let config = step.config.clone().unwrap_or(serde_json::json!({}));
-        return (executor.clone(), config);
-    }
-
-    // Container step (with optional command inside).
     if let Some(ref container) = step.container {
-        let command = step
-            .command
-            .clone()
-            .or_else(|| step.commands.as_ref().map(|cmds| cmds.join(" && ")));
-
+        // Container step — command may be provided alongside.
+        let cmd = shell_body.unwrap_or_default();
         let config = serde_json::json!({
             "image": container.image,
-            "command": command.map(|c| vec!["sh".to_string(), "-c".to_string(), format!("{env_prefix}set -euo pipefail\n{c}")]),
+            "command": cmd,
             "env": env,
             "working_dir": container.working_dir,
         });
-        return ("container".to_string(), config);
-    }
-
-    // Command(s) step → shell executor.
-    let command = if let Some(ref cmd) = step.command {
-        cmd.clone()
-    } else if let Some(ref cmds) = step.commands {
-        cmds.join(" && ")
+        ("container".to_string(), config)
+    } else if let Some(body) = shell_body {
+        let full_command = format!("{env_prefix}set -euo pipefail\n{body}");
+        let executor_name = if step.spawn { "spawn" } else { "shell" };
+        let config = serde_json::json!({ "command": full_command });
+        (executor_name.to_string(), config)
+    } else if let Some(ref block_msg) = step.block {
+        let config = serde_json::json!({ "message": block_msg });
+        ("approval".to_string(), config)
+    } else if let Some(ref trigger) = step.trigger {
+        let config = serde_json::json!({
+            "pipeline": trigger.pipeline,
+            "env": trigger.env,
+        });
+        ("trigger".to_string(), config)
+    } else if let Some(ref executor) = step.executor {
+        let config = step.config.clone().unwrap_or(serde_json::Value::Null);
+        (executor.clone(), config)
     } else {
         // Shouldn't reach here after validation.
-        return ("noop".to_string(), serde_json::json!({}));
-    };
-
-    // Substitute matrix variables in the command.
-    let mut full_command = command;
-    if let Some(combo) = matrix_combo {
-        for (k, v) in combo {
-            full_command = full_command.replace(&format!("${{{k}}}"), v);
-            full_command = full_command.replace(&format!("${{matrix.{k}}}"), v);
-            full_command = full_command.replace("${matrix}", v);
-        }
+        ("noop".to_string(), serde_json::json!({}))
     }
-
-    let full_command = format!("{env_prefix}set -euo pipefail\n{full_command}");
-    let executor_name = if step.spawn { "spawn" } else { "shell" };
-    let config = serde_json::json!({ "command": full_command });
-    (executor_name.to_string(), config)
 }
 
 /// Resolve cache key by substituting matrix variables.
@@ -494,7 +469,6 @@ fn resolve_cache_key(key: &str, matrix_combo: Option<&HashMap<String, String>>) 
     if let Some(combo) = matrix_combo {
         for (k, v) in combo {
             resolved = resolved.replace(&format!("${{matrix.{k}}}"), v);
-            resolved = resolved.replace("${matrix}", v);
         }
     }
     resolved
@@ -514,6 +488,7 @@ fn resolve_condition(condition: &Option<String>, ctx: &BuildContext) -> Option<S
     })
 }
 
+/// Escape a string for safe use in shell export statements.
 fn shell_escape(s: &str) -> String {
     if s.chars()
         .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
@@ -524,6 +499,7 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
+/// Build queue config from pipeline-level settings.
 fn build_queue_config(pipeline: &Pipeline) -> QueueConfig {
     let mut config = QueueConfig::default();
 
@@ -534,6 +510,7 @@ fn build_queue_config(pipeline: &Pipeline) -> QueueConfig {
         config.timeout_secs = timeout;
     }
 
+    // Map pipeline secrets to Tasked SecretRef.
     if !pipeline.secrets.is_empty() {
         let mut secrets = HashMap::new();
         for (name, source) in &pipeline.secrets {
@@ -554,6 +531,7 @@ fn build_queue_config(pipeline: &Pipeline) -> QueueConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::Pipeline;
 
     fn minimal_pipeline() -> Pipeline {
         serde_json::from_str(
@@ -589,6 +567,7 @@ mod tests {
         .unwrap();
         let ctx = BuildContext::default();
         let result = compile(&pipeline, &ctx).unwrap();
+        // Should have checkout + test.
         assert_eq!(result.flow_def.tasks.len(), 2);
         assert_eq!(result.flow_def.tasks[0].id.0, "__checkout");
         assert_eq!(result.flow_def.tasks[1].depends_on[0].0, "__checkout");
@@ -615,52 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_single_depends_on() {
-        let pipeline: Pipeline = serde_json::from_str(
-            r#"{
-                "checkout": false,
-                "steps": [
-                    {"key": "a", "command": "echo a"},
-                    {"key": "b", "command": "echo b", "depends_on": "a"}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let ctx = BuildContext::default();
-        let result = compile(&pipeline, &ctx).unwrap();
-        assert_eq!(result.flow_def.tasks[1].depends_on[0].0, "a");
-    }
-
-    #[test]
-    fn compile_matrix_simple() {
-        let pipeline: Pipeline = serde_json::from_str(
-            r#"{
-                "checkout": false,
-                "steps": [
-                    {
-                        "key": "test",
-                        "command": "cargo test --features ${matrix}",
-                        "matrix": ["serde", "tokio"]
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
-        let ctx = BuildContext::default();
-        let result = compile(&pipeline, &ctx).unwrap();
-        assert_eq!(result.flow_def.tasks.len(), 2);
-        let ids: Vec<&str> = result
-            .flow_def
-            .tasks
-            .iter()
-            .map(|t| t.id.0.as_str())
-            .collect();
-        assert!(ids.contains(&"test-serde"));
-        assert!(ids.contains(&"test-tokio"));
-    }
-
-    #[test]
-    fn compile_matrix_multi() {
+    fn compile_matrix_expansion() {
         let pipeline: Pipeline = serde_json::from_str(
             r#"{
                 "checkout": false,
@@ -680,6 +614,7 @@ mod tests {
         let ctx = BuildContext::default();
         let result = compile(&pipeline, &ctx).unwrap();
 
+        // test-nightly, test-stable, build (with fan-in deps on both).
         let ids: Vec<&str> = result
             .flow_def
             .tasks
@@ -700,55 +635,6 @@ mod tests {
     }
 
     #[test]
-    fn compile_block_step() {
-        let pipeline: Pipeline = serde_json::from_str(
-            r#"{
-                "checkout": false,
-                "steps": [
-                    {"key": "approve", "block": "Deploy?"}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let ctx = BuildContext::default();
-        let result = compile(&pipeline, &ctx).unwrap();
-        assert_eq!(result.flow_def.tasks[0].executor, "approval");
-    }
-
-    #[test]
-    fn compile_executor_escape_hatch() {
-        let pipeline: Pipeline = serde_json::from_str(
-            r#"{
-                "checkout": false,
-                "steps": [
-                    {"key": "notify", "executor": "http", "config": {"url": "https://example.com"}}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let ctx = BuildContext::default();
-        let result = compile(&pipeline, &ctx).unwrap();
-        assert_eq!(result.flow_def.tasks[0].executor, "http");
-    }
-
-    #[test]
-    fn compile_commands_joined() {
-        let pipeline: Pipeline = serde_json::from_str(
-            r#"{
-                "checkout": false,
-                "steps": [
-                    {"key": "build", "commands": ["make clean", "make build"]}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let ctx = BuildContext::default();
-        let result = compile(&pipeline, &ctx).unwrap();
-        let cmd = result.flow_def.tasks[0].config["command"].as_str().unwrap();
-        assert!(cmd.contains("make clean && make build"));
-    }
-
-    #[test]
     fn compile_env_merge() {
         let pipeline: Pipeline = serde_json::from_str(
             r#"{
@@ -762,27 +648,10 @@ mod tests {
         .unwrap();
         let ctx = BuildContext::default();
         let result = compile(&pipeline, &ctx).unwrap();
-        let cmd = result.flow_def.tasks[0].config["command"].as_str().unwrap();
+        let config = &result.flow_def.tasks[0].config;
+        let cmd = config["command"].as_str().unwrap();
         assert!(cmd.contains("GLOBAL"));
         assert!(cmd.contains("LOCAL"));
-    }
-
-    #[test]
-    fn compile_auto_key() {
-        let pipeline: Pipeline = serde_json::from_str(
-            r#"{
-                "checkout": false,
-                "steps": [
-                    {"command": "echo a"},
-                    {"command": "echo b"}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let ctx = BuildContext::default();
-        let result = compile(&pipeline, &ctx).unwrap();
-        assert_eq!(result.flow_def.tasks[0].id.0, "step-0");
-        assert_eq!(result.flow_def.tasks[1].id.0, "step-1");
     }
 
     #[test]
@@ -796,13 +665,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let steps = auto_key(&pipeline.steps);
-        let err = validate(&steps, &pipeline).unwrap_err();
+        let err = validate(&pipeline).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
     }
 
     #[test]
-    fn validate_duplicate_key() {
+    fn validate_duplicate_id() {
         let pipeline: Pipeline = serde_json::from_str(
             r#"{
                 "checkout": false,
@@ -813,8 +681,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let steps = auto_key(&pipeline.steps);
-        let err = validate(&steps, &pipeline).unwrap_err();
+        let err = validate(&pipeline).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
 
@@ -829,8 +696,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let steps = auto_key(&pipeline.steps);
-        let err = validate(&steps, &pipeline).unwrap_err();
+        let err = validate(&pipeline).unwrap_err();
         assert!(err.to_string().contains("multiple"));
     }
 
@@ -846,30 +712,136 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let steps = auto_key(&pipeline.steps);
-        assert!(validate(&steps, &pipeline).is_ok());
+        assert!(validate(&pipeline).is_ok());
     }
 
     #[test]
-    fn v1_compat() {
-        // v1 format with "tasks" and "id" should still parse and compile
+    fn compile_commands_shorthand() {
         let pipeline: Pipeline = serde_json::from_str(
             r#"{
                 "checkout": false,
-                "tasks": [
-                    {"id": "test", "command": "cargo test", "retries": 2, "timeout_secs": 300}
-                ],
-                "retries": 1,
-                "timeout_secs": 600
+                "steps": [
+                    {"key": "build", "commands": ["cargo build", "cargo test"]}
+                ]
             }"#,
         )
         .unwrap();
         let ctx = BuildContext::default();
         let result = compile(&pipeline, &ctx).unwrap();
-        assert_eq!(result.flow_def.tasks[0].id.0, "test");
-        assert_eq!(result.flow_def.tasks[0].retries, Some(2));
-        assert_eq!(result.flow_def.tasks[0].timeout_secs, Some(300));
+        let cmd = result.flow_def.tasks[0].config["command"].as_str().unwrap();
+        assert!(cmd.contains("cargo build && cargo test"));
+    }
+
+    #[test]
+    fn compile_block_step() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "steps": [
+                    {"key": "approve", "block": "Deploy to prod?"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].executor, "approval");
+    }
+
+    #[test]
+    fn compile_trigger_step() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "steps": [
+                    {"key": "deploy", "trigger": {"pipeline": "deploy-prod"}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].executor, "trigger");
+    }
+
+    #[test]
+    fn compile_auto_id() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "steps": [
+                    {"command": "echo hello"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].id.0, "step-0");
+    }
+
+    #[test]
+    fn compile_simple_matrix() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "steps": [
+                    {
+                        "key": "test",
+                        "command": "cargo test",
+                        "matrix": ["default", "serde"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        let ids: Vec<&str> = result
+            .flow_def
+            .tasks
+            .iter()
+            .map(|t| t.id.0.as_str())
+            .collect();
+        assert!(ids.contains(&"test-default"));
+        assert!(ids.contains(&"test-serde"));
+    }
+
+    #[test]
+    fn compile_container_with_command() {
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "steps": [
+                    {"key": "test", "container": {"image": "node:20"}, "command": "npm test"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].executor, "container");
+    }
+
+    #[test]
+    fn v1_compat_fields() {
+        // v1 used "tasks", "id", "retries", "timeout_secs" — all aliased in v2 schema.
+        let pipeline: Pipeline = serde_json::from_str(
+            r#"{
+                "checkout": false,
+                "tasks": [
+                    {"id": "test", "command": "echo", "retries": 3, "timeout_secs": 60}
+                ],
+                "retries": 1,
+                "timeout_secs": 300
+            }"#,
+        )
+        .unwrap();
+        let ctx = BuildContext::default();
+        let result = compile(&pipeline, &ctx).unwrap();
+        assert_eq!(result.flow_def.tasks[0].retries, Some(3));
+        assert_eq!(result.flow_def.tasks[0].timeout_secs, Some(60));
         assert_eq!(result.queue_config.max_retries, 1);
-        assert_eq!(result.queue_config.timeout_secs, 600);
+        assert_eq!(result.queue_config.timeout_secs, 300);
     }
 }

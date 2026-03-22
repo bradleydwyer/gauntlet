@@ -109,6 +109,38 @@ enum Commands {
 
     /// Print the pipeline JSON schema.
     Schema,
+
+    /// Run the CI daemon (webhook receiver + optional poller).
+    Serve {
+        /// Data directory for builds, workspaces, and state.
+        #[arg(long, default_value = "~/.gauntlet")]
+        data_dir: String,
+
+        /// GitHub App ID.
+        #[arg(long, env = "GITHUB_APP_ID")]
+        github_app_id: u64,
+
+        /// Path to GitHub App private key PEM file.
+        #[arg(long, env = "GITHUB_PRIVATE_KEY")]
+        github_private_key: String,
+
+        /// Port to listen on.
+        #[arg(long, default_value_t = 7711)]
+        port: u16,
+
+        /// Webhook secret for GitHub webhook signature verification.
+        /// If set, enables webhook mode (disables polling).
+        #[arg(long, env = "GITHUB_WEBHOOK_SECRET")]
+        webhook_secret: Option<String>,
+
+        /// Poll interval in seconds (only used in poll mode).
+        #[arg(long, default_value_t = 30)]
+        poll_interval: u64,
+
+        /// Max concurrent build tasks.
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+    },
 }
 
 #[tokio::main]
@@ -165,6 +197,48 @@ async fn main() {
         Commands::Validate { file, format } => validate_pipeline(&file, &format),
         Commands::Schema => {
             print_schema();
+            0
+        }
+        Commands::Serve {
+            data_dir,
+            github_app_id,
+            github_private_key,
+            port,
+            webhook_secret,
+            poll_interval,
+            concurrency,
+        } => {
+            // Switch to info-level logging for daemon mode.
+            drop(
+                tracing_subscriber::fmt()
+                    .with_env_filter("gauntlet=info,tasked=info")
+                    .try_init(),
+            );
+
+            let data_dir = shellexpand::tilde(&data_dir).to_string();
+            let private_key = shellexpand::tilde(&github_private_key).to_string();
+
+            let github_app = match gauntlet::github_app::GitHubApp::from_pem_file(
+                github_app_id,
+                std::path::Path::new(&private_key),
+            ) {
+                Ok(app) => std::sync::Arc::new(app),
+                Err(e) => {
+                    eprintln!("Failed to load GitHub App key: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            gauntlet::serve::run(gauntlet::serve::ServeConfig {
+                port,
+                data_dir: std::path::PathBuf::from(&data_dir),
+                github_app,
+                webhook_secret,
+                poll_interval_secs: poll_interval,
+                concurrency,
+            })
+            .await;
+
             0
         }
     };
