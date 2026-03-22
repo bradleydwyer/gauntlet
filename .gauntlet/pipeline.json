@@ -1,13 +1,9 @@
 {
-  "defs": {
-    "rust": {
-      "runner": { "image": "rust:latest", "setup": "rustup component add clippy rustfmt" }
-    }
-  },
+  "runner": { "image": "rust:latest", "setup": "rustup component add clippy rustfmt" },
   "steps": [
-    { "key": "check",  "use": "rust", "command": "cargo check" },
-    { "key": "clippy", "use": "rust", "command": "cargo clippy -- -D warnings" },
-    { "key": "test",   "use": "rust", "command": "cargo test" },
-    { "key": "fmt",    "use": "rust", "command": "cargo fmt --check" }
+    { "key": "check",  "command": "cargo check" },
+    { "key": "clippy", "command": "cargo clippy -- -D warnings" },
+    { "key": "test",   "command": "cargo test" },
+    { "key": "fmt",    "command": "cargo fmt --check" }
   ]
 }
