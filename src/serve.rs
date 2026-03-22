@@ -644,19 +644,22 @@ fn format_build_output(tasks: &[tasked::types::Task]) -> String {
             lines.push(format!("```\n{error}\n```"));
         }
 
-        // Show stdout/stderr for completed tasks.
+        // Show stdout/stderr. Failed steps get more output.
         if let Some(ref output) = task.output {
+            let is_failed = task.state == TaskState::Failed;
+            let max_len = if is_failed { 4000 } else { 500 };
+
             let stdout = output.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
             let stderr = output.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
 
             if !stdout.is_empty() {
-                let trimmed = truncate(stdout, 2000);
+                let trimmed = truncate(stdout, max_len);
                 lines.push(format!(
                     "<details><summary>stdout</summary>\n\n```\n{trimmed}\n```\n</details>"
                 ));
             }
             if !stderr.is_empty() {
-                let trimmed = truncate(stderr, 2000);
+                let trimmed = truncate(stderr, max_len);
                 lines.push(format!(
                     "<details><summary>stderr</summary>\n\n```\n{trimmed}\n```\n</details>"
                 ));
