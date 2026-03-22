@@ -1,5 +1,5 @@
 {
-  "runner": "host",
+  "runner": "rust:latest",
   "steps": [
     { "key": "check",  "command": "cargo check" },
     { "key": "clippy", "command": "cargo clippy -- -D warnings" },

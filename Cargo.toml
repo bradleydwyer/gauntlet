@@ -10,7 +10,7 @@ name = "gauntlet"
 path = "src/main.rs"
 
 [dependencies]
-tasked = { path = "../tasked/tasked", features = ["docker"] }
+tasked = { git = "https://github.com/bradleydwyer/tasked", features = ["docker"] }
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"

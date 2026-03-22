@@ -462,7 +462,13 @@ fn expand_executor(
 
     // Shell command — may be wrapped in a Docker container via runner.
     if let Some(body) = shell_body {
-        let full_command = format!("{env_prefix}set -euo pipefail\n{body}");
+        // cd into workspace if available (serve mode).
+        let cd_prefix = ctx
+            .repo_dir
+            .as_ref()
+            .map(|dir| format!("cd {dir}\n"))
+            .unwrap_or_default();
+        let full_command = format!("{env_prefix}{cd_prefix}set -euo pipefail\n{body}");
 
         // Check if the runner specifies a Docker image.
         let docker_image = runner.and_then(|r| r.docker_image());
