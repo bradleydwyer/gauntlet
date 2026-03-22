@@ -111,22 +111,23 @@ enum Commands {
     Schema,
 
     /// Run the CI daemon (webhook receiver + optional poller).
+    /// Reads defaults from ~/.gauntlet/config.json.
     Serve {
         /// Data directory for builds, workspaces, and state.
-        #[arg(long, default_value = "~/.gauntlet")]
-        data_dir: String,
+        #[arg(long, env = "GAUNTLET_DATA_DIR")]
+        data_dir: Option<String>,
 
         /// GitHub App ID.
         #[arg(long, env = "GITHUB_APP_ID")]
-        github_app_id: u64,
+        github_app_id: Option<u64>,
 
         /// Path to GitHub App private key PEM file.
         #[arg(long, env = "GITHUB_PRIVATE_KEY")]
-        github_private_key: String,
+        github_private_key: Option<String>,
 
         /// Port to listen on.
-        #[arg(long, default_value_t = 7711)]
-        port: u16,
+        #[arg(long)]
+        port: Option<u16>,
 
         /// Webhook secret for GitHub webhook signature verification.
         /// If set, enables webhook mode (disables polling).
@@ -134,12 +135,12 @@ enum Commands {
         webhook_secret: Option<String>,
 
         /// Poll interval in seconds (only used in poll mode).
-        #[arg(long, default_value_t = 30)]
-        poll_interval: u64,
+        #[arg(long)]
+        poll_interval: Option<u64>,
 
         /// Max concurrent build tasks.
-        #[arg(long, default_value_t = 8)]
-        concurrency: usize,
+        #[arg(long)]
+        concurrency: Option<usize>,
     },
 }
 
@@ -215,11 +216,34 @@ async fn main() {
                 )
                 .init();
 
+            // Load config file, CLI args override.
+            let cfg = gauntlet::config::Config::load_default();
+
+            let data_dir = data_dir
+                .or(cfg.data_dir)
+                .unwrap_or_else(|| "~/.gauntlet".to_string());
             let data_dir = shellexpand::tilde(&data_dir).to_string();
-            let private_key = shellexpand::tilde(&github_private_key).to_string();
+
+            let app_id = github_app_id.or(cfg.github_app_id).unwrap_or_else(|| {
+                eprintln!("error: --github-app-id is required (or set in ~/.gauntlet/config.json)");
+                std::process::exit(1);
+            });
+
+            let private_key_path = github_private_key
+                .or(cfg.github_private_key)
+                .unwrap_or_else(|| {
+                    eprintln!("error: --github-private-key is required (or set in ~/.gauntlet/config.json)");
+                    std::process::exit(1);
+                });
+            let private_key = shellexpand::tilde(&private_key_path).to_string();
+
+            let webhook_secret = webhook_secret.or(cfg.webhook_secret);
+            let port = port.or(cfg.port).unwrap_or(7711);
+            let poll_interval = poll_interval.or(cfg.poll_interval_secs).unwrap_or(30);
+            let concurrency = concurrency.or(cfg.concurrency).unwrap_or(8);
 
             let github_app = match gauntlet::github_app::GitHubApp::from_pem_file(
-                github_app_id,
+                app_id,
                 std::path::Path::new(&private_key),
             ) {
                 Ok(app) => std::sync::Arc::new(app),

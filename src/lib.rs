@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod cache;
 pub mod checkout;
 pub mod compiler;
+pub mod config;
 pub mod convert;
 pub mod github;
 pub mod github_app;
