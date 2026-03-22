@@ -530,6 +530,15 @@ async fn build_monitor(state: Arc<AppState>) {
                     _ => continue,
                 };
 
+                // Fetch task details for the output.
+                let tasks = state
+                    .engine
+                    .get_flow_tasks(&tasked::types::FlowId(flow_id.clone()))
+                    .await
+                    .unwrap_or_default();
+
+                let text = format_build_output(&tasks);
+
                 let output = crate::github::CheckOutput {
                     title: format!(
                         "gauntlet: {}",
@@ -544,7 +553,7 @@ async fn build_monitor(state: Arc<AppState>) {
                         "{}/{} tasks succeeded",
                         flow.tasks_succeeded, flow.task_count
                     ),
-                    text: None,
+                    text: Some(text),
                     annotations: vec![],
                 };
 
@@ -593,4 +602,68 @@ async fn build_monitor(state: Arc<AppState>) {
             state.active_builds.lock().await.remove(flow_id);
         }
     }
+}
+
+/// Format task results as markdown for the GitHub check run output.
+fn format_build_output(tasks: &[tasked::types::Task]) -> String {
+    use tasked::types::TaskState;
+
+    let mut lines = Vec::new();
+
+    for task in tasks {
+        let icon = match task.state {
+            TaskState::Succeeded => "✅",
+            TaskState::Failed => "❌",
+            TaskState::Cancelled => "⏭️",
+            TaskState::Running => "🔄",
+            _ => "⏳",
+        };
+
+        let duration = match (task.started_at, task.completed_at) {
+            (Some(start), Some(end)) => {
+                let secs = (end - start).num_seconds();
+                if secs >= 60 {
+                    format!("{}m{}s", secs / 60, secs % 60)
+                } else {
+                    format!("{secs}s")
+                }
+            }
+            _ => "-".to_string(),
+        };
+
+        lines.push(format!("{icon} **{}** ({duration})", task.id.0));
+
+        // Show error message for failed tasks.
+        if let Some(ref error) = task.error {
+            lines.push(format!("```\n{error}\n```"));
+        }
+
+        // Show stdout/stderr for completed tasks.
+        if let Some(ref output) = task.output {
+            let stdout = output.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let stderr = output.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+
+            if !stdout.is_empty() {
+                let trimmed = truncate(stdout, 2000);
+                lines.push(format!(
+                    "<details><summary>stdout</summary>\n\n```\n{trimmed}\n```\n</details>"
+                ));
+            }
+            if !stderr.is_empty() {
+                let trimmed = truncate(stderr, 2000);
+                lines.push(format!(
+                    "<details><summary>stderr</summary>\n\n```\n{trimmed}\n```\n</details>"
+                ));
+            }
+        }
+
+        lines.push(String::new());
+    }
+
+    lines.join("\n")
+}
+
+/// Truncate a string to max_len, appending "..." if truncated.
+fn truncate(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len { s } else { &s[..max_len] }
 }

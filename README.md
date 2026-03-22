@@ -1,333 +1,185 @@
 # Gauntlet
 
-CI pipeline runner powered by [Tasked](../README.md). Single binary, JSON pipelines, DAG-native execution.
+CI pipeline runner powered by [Tasked](https://github.com/bradleydwyer/tasked). Runs on your own hardware, replaces GitHub Actions.
 
-## Quick Start
+## How it works
+
+1. Push to any repo with a `.gauntlet/pipeline.json`
+2. Gauntlet receives the webhook, clones the repo, compiles the pipeline
+3. Steps execute in parallel via the Tasked DAG engine
+4. Results reported back to GitHub as check runs
+
+## Quick start
 
 ```bash
 # Build
-cargo build -p gauntlet
+cargo build --release
 
-# Create a pipeline
-mkdir -p .gauntlet
-cat > .gauntlet/pipeline.json << 'EOF'
-{
-  "checkout": false,
-  "tasks": [
-    {"id": "lint", "command": "cargo clippy -- -D warnings"},
-    {"id": "test", "command": "cargo test", "depends_on": ["lint"]},
-    {"id": "build", "command": "cargo build --release", "depends_on": ["test"]}
-  ]
-}
-EOF
-
-# Run it
-gauntlet run
+# Run the daemon
+gauntlet serve \
+  --github-app-id YOUR_APP_ID \
+  --github-private-key ~/.gauntlet/private.pem \
+  --webhook-secret YOUR_WEBHOOK_SECRET
 ```
 
-## Why JSON?
+Requires a [GitHub App](#github-app-setup) and a public URL (e.g., [Cloudflare Tunnel](#cloudflare-tunnel)) for webhooks.
 
-Gauntlet uses JSON instead of YAML because:
+## Pipeline format
 
-- LLMs generate valid JSON reliably (structured output, function calling)
-- No indentation sensitivity — no silent breakage from whitespace
-- A published JSON Schema means any agent can generate valid pipelines
-- MCP agents submit it directly — it's already the wire format
-
-If you're writing pipelines by hand and prefer not to write JSON directly, use any language to generate it:
-
-```bash
-python3 generate_pipeline.py | gauntlet run /dev/stdin
-```
-
-## Pipeline Format
-
-Pipelines are JSON files (default: `.gauntlet/pipeline.json`) that compile to Tasked FlowDefs.
-
-### Minimal Example
+`.gauntlet/pipeline.json`:
 
 ```json
 {
-  "tasks": [
-    {"id": "test", "command": "cargo test"}
+  "steps": [
+    { "key": "check",  "command": "cargo check" },
+    { "key": "clippy", "command": "cargo clippy -- -D warnings" },
+    { "key": "test",   "command": "cargo test" },
+    { "key": "fmt",    "command": "cargo fmt --check" }
   ]
 }
 ```
 
-### Full Example
+Steps run in parallel by default. Use `depends_on` to create a DAG:
 
 ```json
 {
-  "on": [{"push": {"branches": ["main"]}}, "pull_request"],
-  "checkout": true,
-  "env": {"RUST_BACKTRACE": "1", "CARGO_TERM_COLOR": "always"},
-  "secrets": {"DEPLOY_TOKEN": {"env": "DEPLOY_TOKEN"}},
-  "timeout_secs": 600,
-  "retries": 1,
-  "tasks": [
-    {
-      "id": "lint",
-      "command": "cargo clippy -- -D warnings"
-    },
-    {
-      "id": "test",
-      "command": "cargo test",
-      "depends_on": ["lint"],
-      "matrix": {
-        "dimensions": {"toolchain": ["stable", "nightly"]}
-      },
-      "cache": {
-        "key": "cargo-${matrix.toolchain}",
-        "paths": ["target/", "~/.cargo/registry/"]
-      },
-      "timeout_secs": 900
-    },
-    {
-      "id": "build",
-      "command": "cargo build --release",
-      "depends_on": ["test"],
-      "artifacts": {"upload": ["target/release/myapp"]}
-    },
-    {
-      "id": "deploy",
-      "command": "./deploy.sh",
-      "depends_on": ["build"],
-      "if": "branch == 'main'"
-    }
+  "steps": [
+    { "key": "test",   "command": "cargo test" },
+    { "key": "build",  "command": "cargo build --release", "depends_on": ["test"] },
+    { "key": "deploy", "command": "./deploy.sh", "depends_on": ["build"], "if": "branch == 'main'" }
   ]
 }
 ```
 
-### Pipeline Fields
+### Runner
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `on` | `Trigger[]` | `[]` | Trigger events (informational in local mode) |
-| `checkout` | `bool` | `true` | Inject a git checkout step as the DAG root |
-| `checkout_config` | `object` | `{depth: 1}` | Checkout options: `depth`, `submodules`, `lfs` |
-| `env` | `map` | `{}` | Global env vars merged into every task |
-| `secrets` | `map` | `{}` | Secret references: `{"name": {"env": "VAR"}}` or `{"name": {"file": "/path"}}` |
-| `retries` | `int` | none | Default retry count for all tasks |
-| `timeout_secs` | `int` | none | Default timeout for all tasks |
-| `tasks` | `Task[]` | required | Pipeline tasks |
-
-### Task Fields
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `id` | `string` | required | Unique task identifier |
-| `command` | `string` | - | Shell command (sugar for shell executor) |
-| `executor` | `string` | - | Explicit executor: `shell`, `container`, `http`, `delay`, `approval`, `noop` |
-| `config` | `object` | - | Executor config (when using `executor` directly) |
-| `container` | `object` | - | Container shorthand: `{image, command?, env?, working_dir?}` |
-| `env` | `map` | `{}` | Task-level env vars (merged on top of global) |
-| `depends_on` | `string[]` | `[]` | Task IDs this task depends on |
-| `if` | `string` | - | Conditional execution expression |
-| `matrix` | `object` | - | Matrix expansion: `{dimensions: {key: [values]}, exclude?: []}` |
-| `retries` | `int` | - | Override retry count |
-| `timeout_secs` | `int` | - | Override timeout |
-| `cache` | `object` | - | Cache config: `{key, paths, restore_keys?}` |
-| `artifacts` | `object` | - | Artifacts: `{upload?: [paths], download_from?: [task_ids]}` |
-| `spawn` | `bool` | `false` | Enable dynamic pipeline generation (stdout parsed as task definitions) |
-| `spawn_output` | `string[]` | `[]` | Signal IDs exported by spawn tasks |
-
-Use exactly one of `command`, `container`, or `executor` per task.
-
-### Matrix Builds
-
-Matrix expands a task into multiple parallel variants:
+Steps run on the host by default. Specify a Docker image to run in a container:
 
 ```json
 {
-  "id": "test",
-  "command": "cargo +$MATRIX_TOOLCHAIN test",
+  "runner": "rust:latest",
+  "steps": [
+    { "key": "test", "command": "cargo test" }
+  ]
+}
+```
+
+Per-step override:
+
+```json
+{
+  "steps": [
+    { "key": "test-rust", "command": "cargo test", "runner": "rust:latest" },
+    { "key": "test-node", "command": "npm test", "runner": "node:20" },
+    { "key": "local",     "command": "echo hi",   "runner": "host" }
+  ]
+}
+```
+
+### Step types
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `command` | string | Shell command |
+| `commands` | string[] | Multiple commands (joined with `&&`) |
+| `container` | object | Run in a Docker container (`{"image": "node:20"}`) |
+| `block` | string | Approval gate (pauses pipeline) |
+| `trigger` | object | Start a sub-pipeline |
+| `executor` | string | Raw Tasked executor (escape hatch for http, slack, etc.) |
+
+### Common fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | string | Unique step identifier |
+| `depends_on` | string or string[] | Steps that must complete first |
+| `if` | string | Condition expression (e.g., `branch == 'main'`) |
+| `env` | object | Environment variables |
+| `timeout` | number | Timeout in seconds |
+| `retry` | number | Auto-retry count |
+| `soft_fail` | bool | Failure doesn't fail the pipeline |
+| `matrix` | string[] or object | Matrix expansion |
+| `artifacts` | string[] | Glob patterns to upload |
+
+### Matrix builds
+
+```json
+{
+  "key": "test",
+  "command": "cargo test --features ${matrix}",
+  "matrix": ["serde", "tokio", "full"]
+}
+```
+
+Multi-dimension:
+
+```json
+{
+  "key": "test",
+  "command": "cargo +${matrix.toolchain} test",
   "matrix": {
     "dimensions": {
       "toolchain": ["stable", "nightly"],
-      "features": ["default", "all"]
+      "target": ["x86_64", "aarch64"]
     },
-    "exclude": [
-      {"toolchain": "nightly", "features": "all"}
-    ]
+    "exclude": [{ "toolchain": "nightly", "target": "aarch64" }]
   }
 }
 ```
 
-This produces 3 tasks: `test-stable-all`, `test-stable-default`, `test-nightly-default`. Matrix values are injected as `MATRIX_<KEY>` environment variables. Downstream tasks that `depends_on: ["test"]` automatically fan-in on all variants.
+## GitHub App setup
 
-### Dynamic Pipelines (Spawn)
+1. Go to **Settings > Developer Settings > GitHub Apps > New GitHub App**
+2. Set permissions: Checks (rw), Commit statuses (rw), Contents (read), Pull requests (read)
+3. Subscribe to events: Push, Pull request
+4. Set Webhook URL to your public URL + `/webhook/github`
+5. Set a Webhook secret
+6. Install on **All repositories**
+7. Download the private key
 
-A task with `spawn: true` has its stdout parsed as a JSON array of new task definitions, injected into the running DAG:
+## Cloudflare Tunnel
 
-```json
-{
-  "tasks": [
-    {
-      "id": "discover",
-      "command": "./find-changed-services.sh",
-      "spawn": true,
-      "spawn_output": ["complete"]
-    },
-    {
-      "id": "deploy-all",
-      "command": "echo 'all services deployed'",
-      "depends_on": ["discover/complete"]
-    }
-  ]
-}
+For webhook delivery to a machine behind NAT:
+
+```bash
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create gauntlet
+cloudflared tunnel route dns gauntlet your-subdomain.example.com
 ```
 
-The `discover` task outputs JSON task definitions. Generated tasks are namespaced under `discover/`. The `deploy-all` task waits for all generated tasks to complete.
+`~/.cloudflared/config.yml`:
+```yaml
+tunnel: <tunnel-id>
+credentials-file: ~/.cloudflared/<tunnel-id>.json
 
-### Caching
-
-Local filesystem cache at `~/.gauntlet/cache/`:
-
-```json
-{
-  "id": "build",
-  "command": "npm install && npm run build",
-  "cache": {
-    "key": "node-modules-${file.hash:package-lock.json}",
-    "paths": ["node_modules/"],
-    "restore_keys": ["node-modules-"]
-  }
-}
+ingress:
+  - hostname: your-subdomain.example.com
+    service: http://localhost:7711
+  - service: http_status:404
 ```
 
-Cache restore runs before the task, cache save runs after.
+```bash
+cloudflared tunnel run gauntlet
+```
 
-### Artifacts
+## Architecture
 
-Local filesystem artifacts at `~/.gauntlet/artifacts/`:
-
-```json
-{
-  "id": "build",
-  "command": "cargo build --release",
-  "artifacts": {"upload": ["target/release/myapp"]}
-},
-{
-  "id": "deploy",
-  "command": "./deploy.sh",
-  "depends_on": ["build"],
-  "artifacts": {"download_from": ["build"]}
-}
+```
+GitHub webhook --> Cloudflare Tunnel --> gauntlet serve (port 7711)
+                                            |
+                                            |-- Webhook handler (verify + parse)
+                                            |-- Workspace manager (clone/checkout)
+                                            |-- Compiler (pipeline.json --> Tasked FlowDef)
+                                            |-- Tasked engine (DAG execution)
+                                            +-- GitHub Checks API (report results)
 ```
 
 ## CLI
 
-### `gauntlet run [FILE]`
-
-Execute a pipeline locally. Default file: `.gauntlet/pipeline.json`.
-
 ```
-FLAGS:
-  --ref <REF>           Git ref to checkout
-  --no-checkout         Skip checkout step
-  --no-cache            Disable caching
-  --concurrency <N>     Max parallel tasks (default: CPU count)
-  --filter <IDS>        Run specific tasks + dependencies only
-  --matrix KEY=VAL      Pin a matrix dimension
-  --env KEY=VAL         Override environment variables
-  --secret KEY=VAL      Provide secrets
-  --dry-run             Print compiled FlowDef JSON without executing
-  --auto-approve        Auto-approve approval tasks
-  --github-status       Report commit status to GitHub
-  --github-token <T>    GitHub API token (or GITHUB_TOKEN env)
-  --github-repo <R>     GitHub repo as owner/repo (or GITHUB_REPOSITORY env)
-  --github-sha <S>      Commit SHA (or GITHUB_SHA env)
-  -v, --verbose         Show synthetic tasks and full output
-  -q, --quiet           Only show final result
+gauntlet run [FILE]       # Execute a pipeline locally
+gauntlet serve            # Run the CI daemon
+gauntlet validate [FILE]  # Validate a pipeline
+gauntlet schema           # Print pipeline JSON schema
 ```
-
-Exit codes: `0` success, `1` failure, `2` validation error.
-
-### `gauntlet validate [FILE]`
-
-Validate a pipeline without executing.
-
-```bash
-gauntlet validate                              # text output
-gauntlet validate --format json                # machine-readable
-gauntlet validate .gauntlet/pipeline.json      # explicit path
-```
-
-### `gauntlet schema`
-
-Print the pipeline JSON schema (for IDE validation and LLM system prompts).
-
-## Architecture
-
-Gauntlet is a CI-specific layer on top of Tasked's generic DAG execution engine:
-
-```
-  Pipeline JSON
-       │
-       ▼
-  ┌─────────┐     Gauntlet compiles CI-specific JSON
-  │ Compiler │     into Tasked FlowDefs through 9 passes:
-  │ (9 pass) │     validate → matrix → checkout → cache →
-  └────┬─────┘     artifacts → shorthand → env → condition → assemble
-       │
-       ▼
-  ┌──────────┐
-  │ FlowDef  │     Standard Tasked flow definition
-  └────┬─────┘
-       │
-       ▼
-  ┌──────────┐     Tasked handles:
-  │  Engine   │     DAG scheduling, parallel execution,
-  │ (Tasked)  │     retries, timeouts, variable interpolation,
-  └──────────┘     spawn/dynamic task injection
-```
-
-Gauntlet depends on `tasked` as a library crate. Zero changes to Tasked — all CI opinions live in the Gauntlet crate.
-
-### What Gauntlet Adds vs What Tasked Provides
-
-**Tasked provides:** DAG execution, shell/container/HTTP executors, retries with backoff, timeouts, variable interpolation, spawn (dynamic task injection), approval gates, cron schedules, webhooks, SQLite storage.
-
-**Gauntlet adds:** Pipeline JSON format, CI-specific compiler, matrix expansion, git checkout injection, cache/artifact step injection, environment merging, GitHub commit status, CLI with TUI progress display.
-
-## GitHub Integration
-
-Report pipeline status to GitHub commits:
-
-```bash
-gauntlet run --github-status \
-  --github-token "$GITHUB_TOKEN" \
-  --github-repo "owner/repo" \
-  --github-sha "$(git rev-parse HEAD)"
-```
-
-Or via environment variables (auto-detected in GitHub Actions):
-
-```bash
-export GITHUB_TOKEN="..."
-export GITHUB_REPOSITORY="owner/repo"
-export GITHUB_SHA="$(git rev-parse HEAD)"
-gauntlet run --github-status
-```
-
-## Using Inside GitHub Actions
-
-Use Gauntlet's DAG engine inside a GitHub Actions workflow:
-
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo install --path gauntlet
-      - run: gauntlet run --no-checkout --github-status
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-This gives you DAG-optimized parallel execution, matrix builds, and caching — all within a single GHA job.
-
-# test
-
-
