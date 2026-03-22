@@ -183,3 +183,4 @@ gauntlet serve            # Run the CI daemon
 gauntlet validate [FILE]  # Validate a pipeline
 gauntlet schema           # Print pipeline JSON schema
 ```
+
