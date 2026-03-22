@@ -537,7 +537,12 @@ async fn build_monitor(state: Arc<AppState>) {
                     .await
                     .unwrap_or_default();
 
-                let text = format_build_output(&tasks);
+                let mut text = format_build_output(&tasks);
+                // GitHub Checks API limits text to 65535 characters.
+                if text.len() > 60000 {
+                    text.truncate(60000);
+                    text.push_str("\n\n... (output truncated)");
+                }
 
                 let output = crate::github::CheckOutput {
                     title: format!(
