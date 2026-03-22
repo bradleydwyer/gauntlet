@@ -468,12 +468,41 @@ fn expand_executor(
         let docker_image = runner.and_then(|r| r.docker_image());
 
         if let Some(image) = docker_image {
-            // Wrap in container executor with cache volume mounts.
-            let config = serde_json::json!({
+            // Wrap in container executor with workspace + cache volume mounts.
+            let mut volumes = vec![];
+
+            // Mount workspace directory if available.
+            if let Some(ref repo_dir) = ctx.repo_dir {
+                volumes.push(format!("{repo_dir}:/workspace"));
+            }
+
+            // Mount common cache directories for faster builds.
+            let cache_base = dirs::home_dir().unwrap_or_default().join(".gauntlet/cache");
+            let cache_mounts = [
+                ("cargo/registry", "/usr/local/cargo/registry"),
+                ("cargo/git", "/usr/local/cargo/git"),
+                ("npm", "/root/.npm"),
+                ("pip", "/root/.cache/pip"),
+            ];
+            for (host_sub, container_path) in &cache_mounts {
+                let host_path = cache_base.join(host_sub);
+                // Create the host directory if it doesn't exist.
+                let _ = std::fs::create_dir_all(&host_path);
+                volumes.push(format!("{}:{container_path}", host_path.display()));
+            }
+
+            let mut config = serde_json::json!({
                 "image": image,
                 "command": ["sh", "-c", full_command],
                 "env": env,
+                "volumes": volumes,
             });
+
+            // Set working directory to mounted workspace.
+            if ctx.repo_dir.is_some() {
+                config["working_dir"] = serde_json::json!("/workspace");
+            }
+
             return ("container".to_string(), config);
         }
 

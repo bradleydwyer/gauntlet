@@ -13,6 +13,7 @@ path = "src/main.rs"
 tasked = { path = "../tasked/tasked", features = ["docker"] }
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
 jsonwebtoken = "9"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
