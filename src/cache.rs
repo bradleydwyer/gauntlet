@@ -78,11 +78,7 @@ fn expand_tilde(path: &str) -> String {
 /// Get the last component of a path for use as cache entry name.
 fn path_basename(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
-    trimmed
-        .rsplit('/')
-        .next()
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
 }
 
 #[cfg(test)]

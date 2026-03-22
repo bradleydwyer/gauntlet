@@ -1,5 +1,5 @@
 use super::{ConvertError, Converter};
-use crate::schema::{Pipeline, PipelineTask, Trigger};
+use crate::schema::{CheckoutSetting, DependsOn, Pipeline, Step, Trigger};
 
 /// Converts GitHub Actions workflow YAML to Gauntlet Pipeline JSON.
 ///
@@ -10,8 +10,6 @@ pub struct GitHubActionsConverter;
 
 impl Converter for GitHubActionsConverter {
     fn convert(&self, source: &str) -> Result<Pipeline, ConvertError> {
-        // Phase 1: basic structural conversion.
-        // Parse the YAML, extract jobs, map to tasks.
         let yaml: serde_json::Value = serde_yaml_to_json(source)?;
 
         let jobs = yaml
@@ -19,18 +17,17 @@ impl Converter for GitHubActionsConverter {
             .and_then(|j| j.as_object())
             .ok_or_else(|| ConvertError::Parse("no 'jobs' key found".into()))?;
 
-        let mut tasks = Vec::new();
+        let mut steps = Vec::new();
 
         for (job_id, job) in jobs {
-            let steps = job
+            let job_steps = job
                 .get("steps")
                 .and_then(|s| s.as_array())
                 .unwrap_or(&Vec::new())
                 .clone();
 
-            // Collect run commands from steps, skip `uses` steps with a TODO.
             let mut commands = Vec::new();
-            for step in &steps {
+            for step in &job_steps {
                 if let Some(run) = step.get("run").and_then(|r| r.as_str()) {
                     commands.push(run.to_string());
                 } else if let Some(uses) = step.get("uses").and_then(|u| u.as_str()) {
@@ -44,53 +41,40 @@ impl Converter for GitHubActionsConverter {
                 commands.join("\n")
             };
 
-            // Map `needs` to `depends_on`.
             let depends_on = match job.get("needs") {
-                Some(serde_json::Value::String(s)) => vec![s.clone()],
-                Some(serde_json::Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect(),
-                _ => vec![],
+                Some(serde_json::Value::String(s)) => DependsOn::Single(s.clone()),
+                Some(serde_json::Value::Array(arr)) => DependsOn::Multiple(
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                ),
+                _ => DependsOn::None,
             };
 
-            // Map `if` condition.
             let condition = job
                 .get("if")
                 .and_then(|v| v.as_str())
                 .map(|s| format!("# TODO: convert expression: {s}"));
 
-            tasks.push(PipelineTask {
-                id: job_id.clone(),
+            steps.push(Step {
+                key: Some(job_id.clone()),
                 command: Some(combined_command),
-                executor: None,
-                config: None,
-                container: None,
-                env: Default::default(),
                 depends_on,
                 condition,
-                matrix: None, // TODO: convert strategy.matrix
-                retries: None,
-                timeout_secs: None,
-                cache: None,
-                artifacts: None,
-                spawn: false,
-                spawn_output: vec![],
+                ..Default::default()
             });
         }
 
-        // Convert triggers.
         let triggers = convert_triggers(&yaml);
 
         Ok(Pipeline {
+            steps,
             on: triggers,
-            checkout: true,
-            checkout_config: None,
+            checkout: CheckoutSetting::Enabled(true),
             env: Default::default(),
             secrets: Default::default(),
-            retries: None,
-            timeout_secs: None,
-            tasks,
+            retry: None,
+            timeout: None,
         })
     }
 }
@@ -104,9 +88,7 @@ fn convert_triggers(yaml: &serde_json::Value) -> Vec<Trigger> {
                 if let Some(s) = item.as_str() {
                     match s {
                         "push" => triggers.push(Trigger::Push { branches: None }),
-                        "pull_request" => {
-                            triggers.push(Trigger::PullRequest { branches: None })
-                        }
+                        "pull_request" => triggers.push(Trigger::PullRequest { branches: None }),
                         _ => {}
                     }
                 }
@@ -131,16 +113,9 @@ fn convert_triggers(yaml: &serde_json::Value) -> Vec<Trigger> {
     triggers
 }
 
-/// Minimal YAML to JSON conversion using serde.
-/// In Phase 1, we use serde_json::Value as the intermediate representation
-/// and do manual parsing rather than adding a YAML dependency.
 fn serde_yaml_to_json(_yaml_str: &str) -> Result<serde_json::Value, ConvertError> {
-    // For Phase 1, we parse a simplified subset.
-    // A proper implementation would use the `serde_yaml` crate.
-    // For now, return an error suggesting the user install serde_yaml.
     Err(ConvertError::Unsupported(
-        "YAML parsing not yet implemented — install Phase 1.5 for full GHA conversion. \
-         For now, manually convert your workflow to Gauntlet JSON format."
+        "YAML parsing not yet implemented. Manually convert your workflow to Gauntlet JSON format."
             .into(),
     ))
 }

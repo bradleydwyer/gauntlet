@@ -10,12 +10,14 @@ name = "gauntlet"
 path = "src/main.rs"
 
 [dependencies]
-tasked = { git = "https://github.com/bradleydwyer/tasked", features = ["docker"] }
-tasked-types = { git = "https://github.com/bradleydwyer/tasked" }
+tasked = { path = "../tasked/tasked", features = ["docker"] }
 clap = { version = "4", features = ["derive", "env"] }
+jsonwebtoken = "9"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hex = "0.4"
+hmac = "0.12"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
@@ -24,4 +26,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3"

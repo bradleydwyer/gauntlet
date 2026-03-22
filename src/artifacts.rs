@@ -5,7 +5,9 @@ use tasked::types::{TaskDef, TaskId};
 /// Phase 1: local filesystem at `~/.gauntlet/artifacts/{flow_id}/{task_id}/`.
 pub fn upload_task(task_id: &str, patterns: &[String]) -> TaskDef {
     let upload_id = format!("{task_id}__artifact_upload");
-    let dest = format!("${{GAUNTLET_ARTIFACTS_DIR:-${{HOME}}/.gauntlet/artifacts}}/${{GAUNTLET_FLOW_ID}}/{task_id}");
+    let dest = format!(
+        "${{GAUNTLET_ARTIFACTS_DIR:-${{HOME}}/.gauntlet/artifacts}}/${{GAUNTLET_FLOW_ID}}/{task_id}"
+    );
 
     let mut commands = vec!["set -euo pipefail".to_string()];
     commands.push(format!("mkdir -p \"{dest}\""));

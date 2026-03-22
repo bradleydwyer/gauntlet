@@ -37,9 +37,7 @@ pub async fn run_flow(
     let flow_short = &flow_id.0[..8.min(flow_id.0.len())];
 
     if !config.quiet {
-        println!(
-            "{YELLOW}▸{RESET} {DIM}Flow {flow_short} submitted ({task_count} tasks){RESET}"
-        );
+        println!("{YELLOW}▸{RESET} {DIM}Flow {flow_short} submitted ({task_count} tasks){RESET}");
     }
 
     // Spawn the engine loop.

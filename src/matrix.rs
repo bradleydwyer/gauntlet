@@ -56,7 +56,13 @@ pub fn suffix(combo: &MatrixCombination) -> String {
 fn sanitize(s: &str) -> String {
     s.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -68,7 +74,10 @@ mod tests {
     #[test]
     fn single_dimension() {
         let config = MatrixConfig {
-            dimensions: HashMap::from([("toolchain".into(), vec!["stable".into(), "nightly".into()])]),
+            dimensions: HashMap::from([(
+                "toolchain".into(),
+                vec!["stable".into(), "nightly".into()],
+            )]),
             exclude: vec![],
         };
         let combos = expand(&config);
@@ -106,7 +115,11 @@ mod tests {
         let combos = expand(&config);
         assert_eq!(combos.len(), 3);
         // macos + nightly should be excluded
-        assert!(!combos.iter().any(|c| c["os"] == "macos" && c["rust"] == "nightly"));
+        assert!(
+            !combos
+                .iter()
+                .any(|c| c["os"] == "macos" && c["rust"] == "nightly")
+        );
     }
 
     #[test]

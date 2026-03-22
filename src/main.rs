@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use tasked::engine::{Engine, EngineConfig};
+use tasked::executor::NoopExecutor;
 use tasked::executor::approval::ApprovalExecutor;
 use tasked::executor::delay::DelayExecutor;
 use tasked::executor::http::HttpExecutor;
-use tasked::executor::NoopExecutor;
 use tasked::executor::shell::ShellExecutor;
 use tasked::executor::spawn::SpawnExecutor;
 use tasked::store::memory::MemoryStorage;
@@ -115,8 +115,7 @@ enum Commands {
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
 
@@ -173,6 +172,7 @@ async fn main() {
     std::process::exit(code);
 }
 
+#[allow(dead_code)]
 struct RunConfig {
     file: String,
     git_ref: Option<String>,
@@ -213,7 +213,7 @@ async fn run_pipeline(config: RunConfig) -> i32 {
 
     // Apply CLI overrides.
     if config.no_checkout {
-        pipeline.checkout = false;
+        pipeline.checkout = gauntlet::schema::CheckoutSetting::Enabled(false);
     }
 
     // Parse env overrides.
@@ -225,14 +225,8 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     }
 
     // Build context.
-    let branch = config
-        .git_ref
-        .clone()
-        .or_else(|| git_current_branch().ok());
-    let sha = config
-        .github_sha
-        .clone()
-        .or_else(|| git_current_sha().ok());
+    let branch = config.git_ref.clone().or_else(|| git_current_branch().ok());
+    let sha = config.github_sha.clone().or_else(|| git_current_sha().ok());
 
     let ctx = BuildContext {
         repo_dir: Some(".".into()),
@@ -319,7 +313,8 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     };
 
     let github_repo = config.github_repo.as_ref().and_then(|r| {
-        r.split_once('/').map(|(o, r)| (o.to_string(), r.to_string()))
+        r.split_once('/')
+            .map(|(o, r)| (o.to_string(), r.to_string()))
     });
 
     let tui_config = TuiConfig {
@@ -331,7 +326,14 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         github_sha: sha,
     };
 
-    tui::run_flow(engine, &flow.id, flow.task_count, &result.metadata, &tui_config).await
+    tui::run_flow(
+        engine,
+        &flow.id,
+        flow.task_count,
+        &result.metadata,
+        &tui_config,
+    )
+    .await
 }
 
 fn validate_pipeline(file: &str, format: &str) -> i32 {

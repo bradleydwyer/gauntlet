@@ -19,11 +19,7 @@ pub fn checkout_task(config: &CheckoutConfig, ctx: &BuildContext) -> TaskDef {
         ""
     };
 
-    let lfs_cmd = if config.lfs {
-        "\ngit lfs pull"
-    } else {
-        ""
-    };
+    let lfs_cmd = if config.lfs { "\ngit lfs pull" } else { "" };
 
     // If we have a specific ref, fetch and checkout.
     // If running locally with no ref, this is essentially a noop that verifies git state.
