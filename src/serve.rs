@@ -234,6 +234,32 @@ async fn handle_webhook(
         }
     };
 
+    // Log webhook to dashboard.
+    {
+        let (repo, detail) = match &event {
+            GitHubEvent::Push {
+                repo_full_name,
+                branch,
+                sha,
+                ..
+            } => (
+                repo_full_name.clone(),
+                format!("{} {}", branch, &sha[..7.min(sha.len())]),
+            ),
+            GitHubEvent::PullRequest {
+                repo_full_name,
+                number,
+                action,
+                ..
+            } => (repo_full_name.clone(), format!("#{number} {action}")),
+        };
+        state
+            .dashboard
+            .lock()
+            .await
+            .log_webhook(repo, event_type.to_string(), detail);
+    }
+
     // Trigger build.
     let state_clone = state.clone();
     tokio::spawn(async move {

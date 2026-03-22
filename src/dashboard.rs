@@ -34,10 +34,20 @@ pub struct BuildEntry {
     pub tasks_failed: usize,
 }
 
+/// A webhook event log entry.
+#[derive(Debug, Clone)]
+pub struct WebhookEvent {
+    pub time: chrono::DateTime<chrono::Utc>,
+    pub repo: String,
+    pub event_type: String,
+    pub detail: String,
+}
+
 /// Shared dashboard state, updated by the build monitor.
 pub struct DashboardState {
     pub active_builds: Vec<BuildEntry>,
     pub recent_builds: VecDeque<BuildEntry>,
+    pub webhook_log: VecDeque<WebhookEvent>,
     pub engine: Arc<Engine>,
 }
 
@@ -46,7 +56,20 @@ impl DashboardState {
         Self {
             active_builds: Vec::new(),
             recent_builds: VecDeque::with_capacity(50),
+            webhook_log: VecDeque::with_capacity(100),
             engine,
+        }
+    }
+
+    pub fn log_webhook(&mut self, repo: String, event_type: String, detail: String) {
+        self.webhook_log.push_front(WebhookEvent {
+            time: chrono::Utc::now(),
+            repo,
+            event_type,
+            detail,
+        });
+        if self.webhook_log.len() > 100 {
+            self.webhook_log.pop_back();
         }
     }
 
@@ -252,6 +275,12 @@ fn draw_ui(f: &mut ratatui::Frame, dash: &DashboardState, app: &mut App) {
 }
 
 fn draw_builds(f: &mut ratatui::Frame, dash: &DashboardState, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(8)])
+        .split(area);
+
+    // Top: builds list.
     let items: Vec<ListItem> = dash
         .active_builds
         .iter()
@@ -276,7 +305,26 @@ fn draw_builds(f: &mut ratatui::Frame, dash: &DashboardState, app: &mut App, are
     let list = List::new(items)
         .block(Block::default().title(" Builds ").borders(Borders::ALL))
         .highlight_style(Style::default().bg(Color::DarkGray));
-    f.render_stateful_widget(list, area, &mut app.build_list_state);
+    f.render_stateful_widget(list, chunks[0], &mut app.build_list_state);
+
+    // Bottom: webhook log.
+    let webhook_items: Vec<ListItem> = dash
+        .webhook_log
+        .iter()
+        .map(|w| {
+            let time = w.time.format("%H:%M:%S").to_string();
+            let repo_short = w.repo.split('/').next_back().unwrap_or(&w.repo);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {time} "), Style::default().fg(Color::DarkGray)),
+                Span::styled(repo_short, Style::default().fg(Color::Cyan)),
+                Span::raw(format!(" {} {}", w.event_type, w.detail)),
+            ]))
+        })
+        .collect();
+
+    let webhook_list =
+        List::new(webhook_items).block(Block::default().title(" Webhooks ").borders(Borders::ALL));
+    f.render_widget(webhook_list, chunks[1]);
 }
 
 fn draw_tasks(f: &mut ratatui::Frame, dash: &DashboardState, app: &mut App, area: Rect) {

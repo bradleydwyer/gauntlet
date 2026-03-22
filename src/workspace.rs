@@ -112,6 +112,20 @@ impl WorkspaceManager {
             return Err(WorkspaceError::FetchFailed(stderr.into_owned()));
         }
 
+        // Reset any local changes (workspace is disposable).
+        let _ = Command::new("git")
+            .args(["reset", "--hard"])
+            .current_dir(workspace)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .await;
+        let _ = Command::new("git")
+            .args(["clean", "-fd"])
+            .current_dir(workspace)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .await;
+
         self.checkout(workspace, sha).await
     }
 
