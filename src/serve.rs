@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::dashboard::{BuildEntry, DashboardState};
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -51,6 +53,8 @@ struct AppState {
     last_seen: Mutex<HashMap<String, String>>,
     /// Track active builds: flow_id → (repo, sha, check_run_id).
     active_builds: Mutex<HashMap<String, BuildInfo>>,
+    /// Dashboard state for the TUI.
+    dashboard: Arc<Mutex<DashboardState>>,
 }
 
 struct BuildInfo {
@@ -118,6 +122,8 @@ pub async fn run(config: ServeConfig) {
     let logs_dir = config.data_dir.join("logs");
     let _ = std::fs::create_dir_all(&logs_dir);
 
+    let dashboard = Arc::new(Mutex::new(DashboardState::new(engine.clone())));
+
     let state = Arc::new(AppState {
         engine: engine.clone(),
         github_app: config.github_app.clone(),
@@ -126,6 +132,7 @@ pub async fn run(config: ServeConfig) {
         logs_dir,
         last_seen: Mutex::new(HashMap::new()),
         active_builds: Mutex::new(HashMap::new()),
+        dashboard: dashboard.clone(),
     });
 
     // Build HTTP server.
@@ -166,12 +173,29 @@ pub async fn run(config: ServeConfig) {
         build_monitor(monitor_state).await;
     });
 
-    // Run HTTP server.
+    // Run HTTP server in background.
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     info!("listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
 
-    // Clean up (unreachable in practice).
+    // Run TUI dashboard (blocks until user quits with 'q').
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if is_tty {
+        // Small delay to let initial log messages flush before TUI takes over.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Err(e) = crate::dashboard::run_dashboard(dashboard).await {
+            warn!(error = %e, "TUI dashboard failed, continuing headless");
+            // Fall back to waiting on the server.
+            server_task.await.unwrap();
+        }
+    } else {
+        // Not a terminal — run headless.
+        server_task.await.unwrap();
+    }
+
+    // Clean up.
     engine_task.abort();
     poll_task.abort();
     monitor_task.abort();
@@ -450,6 +474,8 @@ async fn trigger_build(state: &AppState, event: &GitHubEvent) -> Result<(), Stri
         .create_queue(&queue_id, compile_result.queue_config)
         .await;
 
+    let task_count = compile_result.flow_def.tasks.len();
+
     let flow = state
         .engine
         .submit_flow(&queue_id, compile_result.flow_def)
@@ -461,13 +487,24 @@ async fn trigger_build(state: &AppState, event: &GitHubEvent) -> Result<(), Stri
 
     // Track the build.
     state.active_builds.lock().await.insert(
-        flow_id,
+        flow_id.clone(),
         BuildInfo {
             repo: repo.clone(),
             sha: sha.clone(),
             check_run_id: Some(check_run.id),
         },
     );
+
+    // Update dashboard.
+    state.dashboard.lock().await.add_build(BuildEntry {
+        flow_id,
+        repo,
+        sha,
+        state: FlowState::Running,
+        task_count,
+        tasks_succeeded: 0,
+        tasks_failed: 0,
+    });
 
     Ok(())
 }
@@ -718,6 +755,14 @@ async fn build_monitor(state: Arc<AppState>) {
                 repo = %build_info.repo,
                 state = %flow.state,
                 "build completed"
+            );
+
+            // Update dashboard.
+            state.dashboard.lock().await.complete_build(
+                flow_id,
+                flow.state,
+                flow.tasks_succeeded,
+                flow.tasks_failed,
             );
 
             // Remove from active builds.

@@ -4,6 +4,7 @@ pub mod checkout;
 pub mod compiler;
 pub mod config;
 pub mod convert;
+pub mod dashboard;
 pub mod github;
 pub mod github_app;
 pub mod matrix;
