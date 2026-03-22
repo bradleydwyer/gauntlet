@@ -2,8 +2,8 @@
   "runner": "rust:latest",
   "steps": [
     { "key": "check",  "command": "cargo check" },
-    { "key": "clippy", "command": "cargo clippy -- -D warnings" },
+    { "key": "clippy", "command": "rustup component add clippy && cargo clippy -- -D warnings" },
     { "key": "test",   "command": "cargo test" },
-    { "key": "fmt",    "command": "cargo fmt --check" }
+    { "key": "fmt",    "command": "rustup component add rustfmt && cargo fmt --check" }
   ]
 }
