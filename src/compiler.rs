@@ -39,6 +39,8 @@ pub struct BuildContext {
     pub branch: Option<String>,
     pub event: Option<String>,
     pub env_overrides: HashMap<String, String>,
+    /// GitHub token for private repo access inside containers.
+    pub github_token: Option<String>,
 }
 
 /// Metadata about the compilation for the TUI.
@@ -462,13 +464,7 @@ fn expand_executor(
 
     // Shell command — may be wrapped in a Docker container via runner.
     if let Some(body) = shell_body {
-        // cd into workspace if available (serve mode).
-        let cd_prefix = ctx
-            .repo_dir
-            .as_ref()
-            .map(|dir| format!("cd {dir}\n"))
-            .unwrap_or_default();
-        let full_command = format!("{env_prefix}{cd_prefix}set -euo pipefail\n{body}");
+        let full_command = format!("{env_prefix}set -euo pipefail\n{body}");
 
         // Check if the runner specifies a Docker image.
         let docker_image = runner.and_then(|r| r.docker_image());
@@ -497,22 +493,43 @@ fn expand_executor(
                 volumes.push(format!("{}:{container_path}", host_path.display()));
             }
 
-            let mut config = serde_json::json!({
+            // Enable git CLI for cargo so it can use credentials for private deps.
+            env.insert(
+                "CARGO_NET_GIT_FETCH_WITH_CLI".to_string(),
+                "true".to_string(),
+            );
+
+            // Inject git credential setup for private repo access.
+            // Uses the GitHub App's installation token (not user credentials).
+            let git_setup = if let Some(ref token) = ctx.github_token {
+                format!(
+                    "git config --global credential.helper '!f() {{ echo \"password={token}\"; }}; f'\n\
+                     git config --global url.\"https://x-access-token@github.com/\".insteadOf \"https://github.com/\"\n"
+                )
+            } else {
+                String::new()
+            };
+
+            let container_command = format!("{git_setup}{full_command}");
+
+            let config = serde_json::json!({
                 "image": image,
-                "command": ["sh", "-c", full_command],
+                "command": ["sh", "-c", container_command],
                 "env": env,
                 "volumes": volumes,
+                "working_dir": "/workspace",
             });
-
-            // Set working directory to mounted workspace.
-            if ctx.repo_dir.is_some() {
-                config["working_dir"] = serde_json::json!("/workspace");
-            }
 
             return ("container".to_string(), config);
         }
 
         // No runner or host runner — run directly in shell.
+        // cd into workspace if available.
+        let full_command = if let Some(ref repo_dir) = ctx.repo_dir {
+            format!("cd {repo_dir}\n{full_command}")
+        } else {
+            full_command
+        };
         let executor_name = if step.spawn { "spawn" } else { "shell" };
         let config = serde_json::json!({ "command": full_command });
         return (executor_name.to_string(), config);

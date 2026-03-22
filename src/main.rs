@@ -308,6 +308,7 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         branch,
         event: None,
         env_overrides,
+        github_token: None,
     };
 
     // Compile.
