@@ -1,6 +1,8 @@
 # Gauntlet
 
-CI pipeline runner powered by [Tasked](https://github.com/bradleydwyer/tasked). Runs on your own hardware, replaces GitHub Actions.
+> **Note:** This is an experimental project and is unlikely to be actively supported. Use at your own risk. It depends on [Tasked](https://github.com/bradleydwyer/tasked) which is not yet public — compilation is not currently possible for external users.
+
+CI pipeline runner powered by Tasked. Runs on your own hardware, replaces GitHub Actions.
 
 ## How it works
 
@@ -295,12 +297,72 @@ gauntlet serve
 
 ## CLI
 
+### `gauntlet serve`
+
+Run the CI daemon with TUI dashboard.
+
 ```
-gauntlet serve              Run the CI daemon
-gauntlet run [FILE]         Execute a pipeline locally
-gauntlet validate [FILE]    Validate a pipeline
-gauntlet schema             Print pipeline JSON schema
+gauntlet serve [OPTIONS]
+
+Options:
+  --data-dir <DIR>                 Data directory [env: GAUNTLET_DATA_DIR] [default: ~/.gauntlet]
+  --github-app-id <ID>             GitHub App ID [env: GITHUB_APP_ID]
+  --github-private-key <PATH>      PEM file path [env: GITHUB_PRIVATE_KEY]
+  --port <PORT>                    Listen port [default: 7711]
+  --webhook-secret <SECRET>        Enable webhook mode [env: GITHUB_WEBHOOK_SECRET]
+  --poll-interval <SECS>           Poll interval (poll mode only) [default: 30]
+  --concurrency <N>                Max concurrent tasks [default: 8]
 ```
+
+All options can be set in `~/.gauntlet/config.json`.
+
+### `gauntlet run [FILE]`
+
+Execute a pipeline locally.
+
+```
+gauntlet run [OPTIONS] [FILE]
+
+Arguments:
+  [FILE]    Pipeline file [default: .gauntlet/pipeline.json]
+
+Options:
+  --git-ref <REF>         Git ref to checkout
+  --no-checkout           Skip checkout step
+  --no-cache              Disable caching
+  --concurrency <N>       Max parallel tasks [default: 16]
+  --filter <IDS>          Run specific tasks only (comma-separated)
+  --matrix <KEY=VALUE>    Pin a matrix dimension
+  --env <KEY=VALUE>       Override environment variables
+  --secret <KEY=VALUE>    Provide secrets
+  --dry-run               Print compiled FlowDef without executing
+  --auto-approve          Auto-approve approval gates
+  --github-status         Report commit status to GitHub
+  -v, --verbose           Show synthetic tasks
+  -q, --quiet             Show final result only
+```
+
+### `gauntlet logs [FLOW_ID]`
+
+View build logs from the running daemon.
+
+```
+gauntlet logs                      List recent builds
+gauntlet logs <FLOW_ID>            Show all step logs for a build
+gauntlet logs <FLOW_ID> --step X   Show a specific step's log
+
+Options:
+  --step <NAME>           Specific step to view
+  --server <URL>          Daemon URL [default: http://localhost:7711]
+```
+
+### `gauntlet validate [FILE]`
+
+Validate a pipeline definition without executing.
+
+### `gauntlet schema`
+
+Print the pipeline JSON schema.
 
 ## Architecture
 
