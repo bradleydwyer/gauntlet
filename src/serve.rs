@@ -689,8 +689,10 @@ async fn build_monitor(state: Arc<AppState>) {
             // Write logs to disk.
             write_logs_to_disk(&state.logs_dir, flow_id, build_info, &tasks);
 
-            // Print results to terminal.
-            print_build_results(flow_id, build_info, &flow, &tasks);
+            // Print results to terminal (only in non-TUI mode).
+            if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                print_build_results(flow_id, build_info, &flow, &tasks);
+            }
 
             // Update GitHub.
             let token = match state.github_app.token().await {

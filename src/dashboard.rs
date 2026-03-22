@@ -136,8 +136,12 @@ pub async fn run_dashboard(dashboard: Arc<Mutex<DashboardState>>) -> std::io::Re
     let mut app = App::new();
 
     loop {
-        // Draw.
+        // Draw + ensure selection is valid.
         let dash = dashboard.lock().await;
+        let total_builds = dash.active_builds.len() + dash.recent_builds.len();
+        if total_builds > 0 && app.build_list_state.selected().is_none() {
+            app.build_list_state.select(Some(0));
+        }
         terminal.draw(|f| draw_ui(f, &dash, &mut app))?;
         drop(dash);
 
@@ -170,12 +174,15 @@ pub async fn run_dashboard(dashboard: Arc<Mutex<DashboardState>>) -> std::io::Re
                                 .iter()
                                 .chain(dash.recent_builds.iter())
                                 .collect();
-                            if let Some(idx) = app.build_list_state.selected()
-                                && let Some(build) = all_builds.get(idx)
-                            {
-                                app.selected_flow_id = Some(build.flow_id.clone());
-                                app.view = View::Tasks;
-                                app.task_list_state.select(Some(0));
+                            if !all_builds.is_empty() {
+                                // Ensure selection is valid.
+                                let idx = app.build_list_state.selected().unwrap_or(0);
+                                let idx = idx.min(all_builds.len() - 1);
+                                if let Some(build) = all_builds.get(idx) {
+                                    app.selected_flow_id = Some(build.flow_id.clone());
+                                    app.view = View::Tasks;
+                                    app.task_list_state.select(Some(0));
+                                }
                             }
                         }
                         View::Tasks => {
