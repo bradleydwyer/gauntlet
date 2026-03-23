@@ -44,6 +44,9 @@ pub struct BuildContext {
     pub env_overrides: HashMap<String, String>,
     /// Extra Docker volume mounts: (host_path, container_path).
     pub extra_volumes: Vec<(String, String)>,
+    /// Per-step workspace directories. Key = step key, value = absolute path.
+    /// If empty, all steps share `repo_dir`.
+    pub step_workspaces: HashMap<String, String>,
     /// GitHub token for private repo access inside containers.
     pub github_token: Option<String>,
 }
@@ -414,11 +417,35 @@ fn build_task_defs(
         }
 
         // Pass 5: Artifact download injection.
+        // Auto-download: if this step depends on steps that have artifacts,
+        // automatically download those artifacts. No explicit download_from needed.
+        let mut auto_download_sources: Vec<String> = Vec::new();
+        for dep_key in &deps {
+            // Find the original step for this dependency.
+            if let Some(dep_step) = pipeline.steps.iter().find(|s| {
+                s.key.as_deref() == Some(dep_key) || s.key.is_none() // auto-keyed steps handled by index
+            })
+                && let Some(ref art) = dep_step.artifacts {
+                    let ac = artifact_to_config(art);
+                    if !ac.upload.is_empty() {
+                        auto_download_sources.push(dep_key.clone());
+                    }
+                }
+        }
+
+        // Combine auto-download sources with explicit download_from.
         let artifact_config = step.artifacts.as_ref().map(artifact_to_config);
-        if let Some(ref ac) = artifact_config
-            && !ac.download_from.is_empty()
-        {
-            let download = artifacts::download_task(task_id, &ac.download_from);
+        let explicit_sources = artifact_config
+            .as_ref()
+            .map(|ac| ac.download_from.clone())
+            .unwrap_or_default();
+
+        let mut all_download_sources = auto_download_sources;
+        all_download_sources.extend(explicit_sources);
+        all_download_sources.dedup();
+
+        if !all_download_sources.is_empty() {
+            let download = artifacts::download_task(task_id, &all_download_sources);
             let download_id = download.id.0.clone();
 
             let mut download_def = download;
@@ -433,8 +460,14 @@ fn build_task_defs(
         let effective_runner = step.runner.as_ref().or(pipeline.runner.as_ref());
 
         // Pass 6: Shorthand expansion + env merge.
-        let (executor, config) =
-            expand_executor(step, &ex.matrix_combo, &pipeline.env, ctx, effective_runner);
+        let (executor, config) = expand_executor(
+            step,
+            task_id,
+            &ex.matrix_combo,
+            &pipeline.env,
+            ctx,
+            effective_runner,
+        );
 
         // Build the main TaskDef.
         let task_def = TaskDef {
@@ -473,11 +506,18 @@ fn build_task_defs(
 /// Expand executor shorthand and merge environment variables into the command.
 fn expand_executor(
     step: &Step,
+    step_key: &str,
     matrix_combo: &Option<HashMap<String, String>>,
     global_env: &HashMap<String, String>,
     ctx: &BuildContext,
     runner: Option<&RunnerConfig>,
 ) -> (String, serde_json::Value) {
+    // Resolve per-step workspace (falls back to repo_dir).
+    let workspace_dir = ctx
+        .step_workspaces
+        .get(step_key)
+        .or(ctx.repo_dir.as_ref())
+        .cloned();
     // Merge env: global -> step -> matrix -> ctx overrides.
     let mut env = global_env.clone();
     env.extend(step.env.clone());
@@ -546,8 +586,8 @@ fn expand_executor(
             let mut volumes = vec![];
 
             // Mount workspace directory if available.
-            if let Some(ref repo_dir) = ctx.repo_dir {
-                volumes.push(format!("{repo_dir}:/workspace"));
+            if let Some(ref dir) = workspace_dir {
+                volumes.push(format!("{dir}:/workspace"));
             }
 
             // Mount common cache directories for faster builds.
@@ -610,8 +650,8 @@ fn expand_executor(
 
         // No runner or host runner — run directly in shell.
         // cd into workspace if available.
-        let full_command = if let Some(ref repo_dir) = ctx.repo_dir {
-            format!("cd {repo_dir}\n{full_command}")
+        let full_command = if let Some(ref dir) = workspace_dir {
+            format!("cd {dir}\n{full_command}")
         } else {
             full_command
         };

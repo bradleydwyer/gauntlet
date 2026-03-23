@@ -11,10 +11,76 @@ use tracing::{debug, info, warn};
 pub struct BuildWorktree {
     /// Root temp directory containing all worktrees.
     pub root: PathBuf,
-    /// Path to the main repo worktree.
-    pub repo_dir: PathBuf,
+    /// Path to the base repo worktree (clean checkout).
+    pub base_dir: PathBuf,
+    /// Per-step workspace directories (APFS clones of base).
+    pub step_dirs: std::collections::HashMap<String, PathBuf>,
     /// Extra volume mounts for Docker: (host_path, container_path).
     pub extra_mounts: Vec<(String, String)>,
+}
+
+impl BuildWorktree {
+    /// Create an APFS clone of the base worktree for a step.
+    /// On macOS, uses `cp -c` (instant clone). On Linux, uses `cp -al` (hardlinks).
+    pub fn create_step_workspace(&mut self, step_key: &str) -> Result<PathBuf, String> {
+        let steps_dir = self.root.join("steps");
+        let _ = std::fs::create_dir_all(&steps_dir);
+        let step_dir = steps_dir.join(step_key);
+
+        if step_dir.exists() {
+            return Ok(step_dir);
+        }
+
+        debug!(step = step_key, "creating step workspace");
+
+        let output = if cfg!(target_os = "macos") {
+            Command::new("cp")
+                .args(["-c", "-r"])
+                .arg(&self.base_dir)
+                .arg(&step_dir)
+                .output()
+        } else {
+            // Linux: hardlink copy.
+            Command::new("cp")
+                .args(["-al"])
+                .arg(&self.base_dir)
+                .arg(&step_dir)
+                .output()
+        };
+
+        match output {
+            Ok(o) if o.status.success() => {
+                self.step_dirs
+                    .insert(step_key.to_string(), step_dir.clone());
+                Ok(step_dir)
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Fallback to regular copy if APFS clone fails.
+                warn!(
+                    step = step_key,
+                    "APFS clone failed, falling back to cp -r: {stderr}"
+                );
+                let output = Command::new("cp")
+                    .args(["-r"])
+                    .arg(&self.base_dir)
+                    .arg(&step_dir)
+                    .output()
+                    .map_err(|e| format!("cp -r: {e}"))?;
+                if output.status.success() {
+                    self.step_dirs
+                        .insert(step_key.to_string(), step_dir.clone());
+                    Ok(step_dir)
+                } else {
+                    Err(format!(
+                        "failed to copy workspace: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                }
+            }
+            Err(e) => Err(format!("cp: {e}")),
+        }
+    }
 }
 
 impl Drop for BuildWorktree {
@@ -33,18 +99,18 @@ pub fn create_build_worktree() -> Result<BuildWorktree, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let id = &uuid::Uuid::new_v4().to_string()[..8];
     let root = std::env::temp_dir().join(format!("gauntlet-run-{id}"));
-    let repo_dir = root.join("repo");
+    let base_dir = root.join("base");
 
     std::fs::create_dir_all(&root).map_err(|e| format!("mkdir: {e}"))?;
 
     // Create detached worktree from HEAD.
-    info!("creating worktree at {}", repo_dir.display());
+    info!("creating worktree at {}", base_dir.display());
     let output = Command::new("git")
         .args([
             "worktree",
             "add",
             "--detach",
-            &repo_dir.to_string_lossy(),
+            &base_dir.to_string_lossy(),
             "HEAD",
         ])
         .current_dir(&cwd)
@@ -66,7 +132,7 @@ pub fn create_build_worktree() -> Result<BuildWorktree, String> {
     if !diff.stdout.is_empty() {
         let apply = Command::new("git")
             .args(["apply", "--allow-empty"])
-            .current_dir(&repo_dir)
+            .current_dir(&base_dir)
             .stdin(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut child| {
@@ -91,7 +157,7 @@ pub fn create_build_worktree() -> Result<BuildWorktree, String> {
     if !staged.stdout.is_empty() {
         let apply = Command::new("git")
             .args(["apply", "--allow-empty"])
-            .current_dir(&repo_dir)
+            .current_dir(&base_dir)
             .stdin(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut child| {
@@ -109,18 +175,19 @@ pub fn create_build_worktree() -> Result<BuildWorktree, String> {
     // Copy .cargo/config.toml if it exists (gitignored but affects build).
     let cargo_config = cwd.join(".cargo/config.toml");
     if cargo_config.exists() {
-        let dest = repo_dir.join(".cargo");
+        let dest = base_dir.join(".cargo");
         let _ = std::fs::create_dir_all(&dest);
         let _ = std::fs::copy(&cargo_config, dest.join("config.toml"));
         debug!("copied .cargo/config.toml into worktree");
     }
 
     // Detect path deps and create sibling worktrees.
-    let extra_mounts = detect_and_mount_path_deps(&cwd, &root, &repo_dir)?;
+    let extra_mounts = detect_and_mount_path_deps(&cwd, &root, &base_dir)?;
 
     Ok(BuildWorktree {
         root,
-        repo_dir,
+        base_dir,
+        step_dirs: std::collections::HashMap::new(),
         extra_mounts,
     })
 }
@@ -130,7 +197,7 @@ pub fn create_build_worktree() -> Result<BuildWorktree, String> {
 fn detect_and_mount_path_deps(
     cwd: &Path,
     root: &Path,
-    _repo_dir: &Path,
+    _base_dir: &Path,
 ) -> Result<Vec<(String, String)>, String> {
     let cargo_config = cwd.join(".cargo/config.toml");
     if !cargo_config.exists() {

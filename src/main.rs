@@ -412,7 +412,7 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     }
 
     // Create build workspace.
-    let _worktree_guard; // Holds the worktree until pipeline completes (Drop cleans up).
+    let mut _worktree_guard; // Holds the worktree until pipeline completes (Drop cleans up).
     let (workspace_dir, extra_mounts) = if config.host || config.live {
         // --host or --live: use live working directory.
         let cwd = std::env::current_dir()
@@ -425,7 +425,7 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         // Default: clean worktree snapshot.
         match gauntlet::worktree::create_build_worktree() {
             Ok(wt) => {
-                let dir = wt.repo_dir.to_string_lossy().to_string();
+                let dir = wt.base_dir.to_string_lossy().to_string();
                 let mounts = wt.extra_mounts.clone();
                 _worktree_guard = Some(wt);
                 (dir, mounts)
@@ -467,6 +467,25 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     let branch = config.git_ref.clone().or_else(|| git_current_branch().ok());
     let sha = config.github_sha.clone().or_else(|| git_current_sha().ok());
 
+    // Create per-step workspaces if using worktree mode.
+    let step_workspaces = if let Some(ref mut wt) = _worktree_guard {
+        let mut ws = std::collections::HashMap::new();
+        for (i, step) in pipeline.steps.iter().enumerate() {
+            let key = step.key.clone().unwrap_or_else(|| format!("step-{i}"));
+            match wt.create_step_workspace(&key) {
+                Ok(path) => {
+                    ws.insert(key, path.to_string_lossy().to_string());
+                }
+                Err(e) => {
+                    eprintln!("Failed to create workspace for step {key}: {e}");
+                }
+            }
+        }
+        ws
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let ctx = BuildContext {
         repo_dir: Some(workspace_dir),
         git_ref: config.git_ref.clone(),
@@ -474,6 +493,7 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         event: None,
         env_overrides,
         extra_volumes: extra_mounts,
+        step_workspaces,
         github_token,
     };
 
