@@ -451,7 +451,14 @@ fn build_task_defs(
                 .artifacts_dir
                 .as_deref()
                 .unwrap_or("/tmp/gauntlet-artifacts");
-            let download = artifacts::download_task(task_id, &all_download_sources, artifacts_dir);
+            let step_ws = ctx
+                .step_workspaces
+                .get(task_id)
+                .or(ctx.repo_dir.as_ref())
+                .cloned()
+                .unwrap_or_else(|| ".".to_string());
+            let download =
+                artifacts::download_task(task_id, &all_download_sources, artifacts_dir, &step_ws);
             let download_id = download.id.0.clone();
 
             let mut download_def = download;
@@ -499,7 +506,13 @@ fn build_task_defs(
                 .artifacts_dir
                 .as_deref()
                 .unwrap_or("/tmp/gauntlet-artifacts");
-            let upload = artifacts::upload_task(task_id, &ac.upload, artifacts_dir);
+            let step_ws = ctx
+                .step_workspaces
+                .get(task_id)
+                .or(ctx.repo_dir.as_ref())
+                .cloned()
+                .unwrap_or_else(|| ".".to_string());
+            let upload = artifacts::upload_task(task_id, &ac.upload, artifacts_dir, &step_ws);
             let upload_id = upload.id.0.clone();
 
             let mut upload_def = upload;
