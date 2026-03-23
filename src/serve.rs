@@ -472,6 +472,7 @@ async fn trigger_build(state: &AppState, event: &GitHubEvent) -> Result<(), Stri
         env_overrides: state.config.secrets_for_repo(&repo),
         extra_volumes: vec![],
         step_workspaces: HashMap::new(), // serve mode: shared workspace
+        artifacts_dir: None,
         github_token: Some(token.clone()),
     };
 

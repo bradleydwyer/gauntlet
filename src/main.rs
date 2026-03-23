@@ -494,6 +494,9 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         env_overrides,
         extra_volumes: extra_mounts,
         step_workspaces,
+        artifacts_dir: _worktree_guard
+            .as_ref()
+            .map(|wt| wt.root.join("artifacts").to_string_lossy().to_string()),
         github_token,
     };
 

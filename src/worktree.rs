@@ -33,53 +33,31 @@ impl BuildWorktree {
 
         debug!(step = step_key, "creating step workspace");
 
-        let output = if cfg!(target_os = "macos") {
-            Command::new("cp")
-                .args(["-c", "-r"])
-                .arg(&self.base_dir)
-                .arg(&step_dir)
-                .output()
-        } else {
-            // Linux: hardlink copy.
-            Command::new("cp")
-                .args(["-al"])
-                .arg(&self.base_dir)
-                .arg(&step_dir)
-                .output()
-        };
+        // Use cp -r (portable). APFS clone (-c) and hardlinks (-al)
+        // don't work reliably in Docker or across filesystems.
+        let output = Command::new("cp")
+            .args(["-r"])
+            .arg(&self.base_dir)
+            .arg(&step_dir)
+            .output();
 
-        match output {
-            Ok(o) if o.status.success() => {
-                self.step_dirs
-                    .insert(step_key.to_string(), step_dir.clone());
-                Ok(step_dir)
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                // Fallback to regular copy if APFS clone fails.
-                warn!(
-                    step = step_key,
-                    "APFS clone failed, falling back to cp -r: {stderr}"
-                );
-                let output = Command::new("cp")
-                    .args(["-r"])
-                    .arg(&self.base_dir)
-                    .arg(&step_dir)
-                    .output()
-                    .map_err(|e| format!("cp -r: {e}"))?;
-                if output.status.success() {
-                    self.step_dirs
-                        .insert(step_key.to_string(), step_dir.clone());
-                    Ok(step_dir)
-                } else {
-                    Err(format!(
-                        "failed to copy workspace: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ))
-                }
-            }
-            Err(e) => Err(format!("cp: {e}")),
+        let output = output.map_err(|e| format!("cp: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to copy workspace: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
+
+        // Remove the .git file/directory from the step workspace.
+        // It references the parent worktree path which won't exist inside Docker.
+        let git_path = step_dir.join(".git");
+        let _ = std::fs::remove_file(&git_path);
+        let _ = std::fs::remove_dir_all(&git_path);
+
+        self.step_dirs
+            .insert(step_key.to_string(), step_dir.clone());
+        Ok(step_dir)
     }
 }
 

@@ -47,6 +47,8 @@ pub struct BuildContext {
     /// Per-step workspace directories. Key = step key, value = absolute path.
     /// If empty, all steps share `repo_dir`.
     pub step_workspaces: HashMap<String, String>,
+    /// Shared artifacts directory for upload/download between steps.
+    pub artifacts_dir: Option<String>,
     /// GitHub token for private repo access inside containers.
     pub github_token: Option<String>,
 }
@@ -424,13 +426,13 @@ fn build_task_defs(
             // Find the original step for this dependency.
             if let Some(dep_step) = pipeline.steps.iter().find(|s| {
                 s.key.as_deref() == Some(dep_key) || s.key.is_none() // auto-keyed steps handled by index
-            })
-                && let Some(ref art) = dep_step.artifacts {
-                    let ac = artifact_to_config(art);
-                    if !ac.upload.is_empty() {
-                        auto_download_sources.push(dep_key.clone());
-                    }
+            }) && let Some(ref art) = dep_step.artifacts
+            {
+                let ac = artifact_to_config(art);
+                if !ac.upload.is_empty() {
+                    auto_download_sources.push(dep_key.clone());
                 }
+            }
         }
 
         // Combine auto-download sources with explicit download_from.
@@ -445,7 +447,11 @@ fn build_task_defs(
         all_download_sources.dedup();
 
         if !all_download_sources.is_empty() {
-            let download = artifacts::download_task(task_id, &all_download_sources);
+            let artifacts_dir = ctx
+                .artifacts_dir
+                .as_deref()
+                .unwrap_or("/tmp/gauntlet-artifacts");
+            let download = artifacts::download_task(task_id, &all_download_sources, artifacts_dir);
             let download_id = download.id.0.clone();
 
             let mut download_def = download;
@@ -489,7 +495,11 @@ fn build_task_defs(
         if let Some(ref ac) = artifact_config
             && !ac.upload.is_empty()
         {
-            let upload = artifacts::upload_task(task_id, &ac.upload);
+            let artifacts_dir = ctx
+                .artifacts_dir
+                .as_deref()
+                .unwrap_or("/tmp/gauntlet-artifacts");
+            let upload = artifacts::upload_task(task_id, &ac.upload, artifacts_dir);
             let upload_id = upload.id.0.clone();
 
             let mut upload_def = upload;
