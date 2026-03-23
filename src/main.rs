@@ -95,6 +95,10 @@ enum Commands {
         #[arg(long)]
         host: bool,
 
+        /// Bind-mount live working directory instead of clean worktree.
+        #[arg(long)]
+        live: bool,
+
         /// Auto-approve all approval tasks.
         #[arg(long)]
         auto_approve: bool,
@@ -209,6 +213,7 @@ async fn main() {
             secret_overrides,
             dry_run,
             host,
+            live,
             auto_approve,
             github_status,
             github_token,
@@ -235,6 +240,7 @@ async fn main() {
                 secret_overrides,
                 dry_run,
                 host,
+                live,
                 auto_approve,
                 github_status,
                 github_token,
@@ -363,6 +369,7 @@ struct RunConfig {
     secret_overrides: Vec<String>,
     dry_run: bool,
     host: bool,
+    live: bool,
     auto_approve: bool,
     github_status: bool,
     github_token: Option<String>,
@@ -404,6 +411,50 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         }
     }
 
+    // Create build workspace.
+    let _worktree_guard; // Holds the worktree until pipeline completes (Drop cleans up).
+    let (workspace_dir, extra_mounts) = if config.host || config.live {
+        // --host or --live: use live working directory.
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        _worktree_guard = None;
+        (cwd, vec![])
+    } else {
+        // Default: clean worktree snapshot.
+        match gauntlet::worktree::create_build_worktree() {
+            Ok(wt) => {
+                let dir = wt.repo_dir.to_string_lossy().to_string();
+                let mounts = wt.extra_mounts.clone();
+                _worktree_guard = Some(wt);
+                (dir, mounts)
+            }
+            Err(e) => {
+                eprintln!("Failed to create build worktree: {e}");
+                eprintln!("Falling back to live directory. Use --live to suppress this warning.");
+                let cwd = std::env::current_dir()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                _worktree_guard = None;
+                (cwd, vec![])
+            }
+        }
+    };
+
+    // For Docker runs, get a git token from `gh auth token` for private deps.
+    let github_token = if !config.host {
+        std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        None
+    };
+
     // Parse env overrides.
     let mut env_overrides = std::collections::HashMap::new();
     for kv in &config.env_overrides {
@@ -417,17 +468,13 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     let sha = config.github_sha.clone().or_else(|| git_current_sha().ok());
 
     let ctx = BuildContext {
-        repo_dir: Some(
-            std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
-        ),
+        repo_dir: Some(workspace_dir),
         git_ref: config.git_ref.clone(),
         branch,
         event: None,
         env_overrides,
-        github_token: None,
+        extra_volumes: extra_mounts,
+        github_token,
     };
 
     // Compile.

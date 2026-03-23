@@ -13,3 +13,4 @@ pub mod serve;
 pub mod tui;
 pub mod webhook;
 pub mod workspace;
+pub mod worktree;

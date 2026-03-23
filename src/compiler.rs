@@ -42,6 +42,8 @@ pub struct BuildContext {
     pub branch: Option<String>,
     pub event: Option<String>,
     pub env_overrides: HashMap<String, String>,
+    /// Extra Docker volume mounts: (host_path, container_path).
+    pub extra_volumes: Vec<(String, String)>,
     /// GitHub token for private repo access inside containers.
     pub github_token: Option<String>,
 }
@@ -561,6 +563,11 @@ fn expand_executor(
                 // Create the host directory if it doesn't exist.
                 let _ = std::fs::create_dir_all(&host_path);
                 volumes.push(format!("{}:{container_path}", host_path.display()));
+            }
+
+            // Add extra volume mounts (e.g., sibling repo worktrees for path deps).
+            for (host_path, container_path) in &ctx.extra_volumes {
+                volumes.push(format!("{host_path}:{container_path}"));
             }
 
             // Enable git CLI for cargo so it can use credentials for private deps.

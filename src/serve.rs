@@ -470,6 +470,7 @@ async fn trigger_build(state: &AppState, event: &GitHubEvent) -> Result<(), Stri
             GitHubEvent::PullRequest { .. } => "pull_request".to_string(),
         }),
         env_overrides: state.config.secrets_for_repo(&repo),
+        extra_volumes: vec![],
         github_token: Some(token.clone()),
     };
 
