@@ -461,8 +461,14 @@ fn build_task_defs(
                 artifacts::download_task(task_id, &all_download_sources, artifacts_dir, &step_ws);
             let download_id = download.id.0.clone();
 
+            // Download must depend on the upload tasks, not the original steps.
+            let upload_deps: Vec<TaskId> = all_download_sources
+                .iter()
+                .map(|src| TaskId(format!("{src}__artifact_upload")))
+                .collect();
+
             let mut download_def = download;
-            download_def.depends_on = deps.iter().map(|d| TaskId(d.clone())).collect();
+            download_def.depends_on = upload_deps;
             deps = vec![download_id.clone()];
 
             metadata.synthetic_tasks.insert(download_id);
