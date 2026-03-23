@@ -401,7 +401,12 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     let sha = config.github_sha.clone().or_else(|| git_current_sha().ok());
 
     let ctx = BuildContext {
-        repo_dir: Some(".".into()),
+        repo_dir: Some(
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        ),
         git_ref: config.git_ref.clone(),
         branch,
         event: None,
@@ -790,10 +795,11 @@ fn manage_secret(action: SecretAction) {
         SecretAction::Remove { name, repo } => {
             let scope = repo.as_deref().unwrap_or("*");
             if let Some(scope_map) = secrets.get_mut(scope)
-                && let Some(obj) = scope_map.as_object_mut() {
-                    obj.remove(&name);
-                    println!("removed {name} from {scope}");
-                }
+                && let Some(obj) = scope_map.as_object_mut()
+            {
+                obj.remove(&name);
+                println!("removed {name} from {scope}");
+            }
         }
         SecretAction::List => {
             if let Some(obj) = secrets.as_object() {
