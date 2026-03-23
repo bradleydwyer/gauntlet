@@ -3,6 +3,6 @@
   "steps": [
     { "key": "fmt",    "command": "cargo fmt --check" },
     { "key": "clippy", "command": "cargo clippy -- -D warnings", "artifacts": ["target/"] },
-    { "key": "test",   "command": "cargo test", "depends_on": ["clippy"] }
+    { "key": "test",   "command": "ls -la target/ 2>&1 | head -5 && cargo test", "depends_on": ["clippy"] }
   ]
 }
