@@ -337,10 +337,13 @@ Options:
   --secret <KEY=VALUE>    Provide secrets
   --dry-run               Print compiled FlowDef without executing
   --auto-approve          Auto-approve approval gates
+  --host                  Run on host, ignore runner config (no Docker)
   --github-status         Report commit status to GitHub
   -v, --verbose           Show synthetic tasks
   -q, --quiet             Show final result only
 ```
+
+**Note on Docker and local path dependencies:** When running with a Docker runner, the workspace is bind-mounted into the container. Local config files like `.cargo/config.toml` that patch dependencies to sibling directories (e.g., `path = "../other-repo"`) will fail inside the container because only the workspace is mounted. Use `--host` to run on the host shell in these cases, or remove the local path patches and use git/registry dependencies.
 
 ### `gauntlet logs [FLOW_ID]`
 
