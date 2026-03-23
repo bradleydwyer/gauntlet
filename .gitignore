@@ -3,3 +3,5 @@
 private.pem
 *.pem
 .cargo/config.toml
+.chunkhound/
+*.png
