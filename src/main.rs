@@ -411,7 +411,10 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         }
     }
 
+    let pipeline_start = std::time::Instant::now();
+
     // Create build workspace.
+    let worktree_start = std::time::Instant::now();
     let mut _worktree_guard; // Holds the worktree until pipeline completes (Drop cleans up).
     let (workspace_dir, extra_mounts) = if config.host || config.live {
         // --host or --live: use live working directory.
@@ -462,6 +465,8 @@ async fn run_pipeline(config: RunConfig) -> i32 {
             env_overrides.insert(k.to_string(), v.to_string());
         }
     }
+
+    let worktree_elapsed = worktree_start.elapsed();
 
     // Build context.
     let branch = config.git_ref.clone().or_else(|| git_current_branch().ok());
@@ -590,14 +595,55 @@ async fn run_pipeline(config: RunConfig) -> i32 {
         github_sha: sha,
     };
 
-    tui::run_flow(
-        engine,
+    let compile_elapsed = pipeline_start.elapsed() - worktree_elapsed;
+    let execution_start = std::time::Instant::now();
+
+    let exit_code = tui::run_flow(
+        engine.clone(),
         &flow.id,
         flow.task_count,
         &result.metadata,
         &tui_config,
     )
-    .await
+    .await;
+
+    let execution_elapsed = execution_start.elapsed();
+    let total_elapsed = pipeline_start.elapsed();
+
+    // Print detailed timing.
+    eprintln!();
+    eprintln!("{DIM}Timing:{RESET}", DIM = "\x1b[2m", RESET = "\x1b[0m");
+    eprintln!("  workspace:   {:>6.1}s", worktree_elapsed.as_secs_f64());
+    eprintln!("  compile:     {:>6.1}s", compile_elapsed.as_secs_f64());
+    eprintln!("  execution:   {:>6.1}s", execution_elapsed.as_secs_f64());
+
+    // Per-task timing from the engine.
+    if let Ok(tasks) = engine.get_flow_tasks(&flow.id).await {
+        eprintln!("  steps:");
+        for task in &tasks {
+            let duration = match (task.started_at, task.completed_at) {
+                (Some(start), Some(end)) => {
+                    format!("{:.1}s", (end - start).num_milliseconds() as f64 / 1000.0)
+                }
+                _ => "-".to_string(),
+            };
+            let state = match task.state {
+                tasked::types::TaskState::Succeeded => "\x1b[32m✓\x1b[0m",
+                tasked::types::TaskState::Failed => "\x1b[31m✗\x1b[0m",
+                _ => " ",
+            };
+            eprintln!("    {state} {:<24} {:>6}", task.id.0, duration);
+        }
+    }
+
+    eprintln!(
+        "  {BOLD}total:       {:>6.1}s{RESET}",
+        total_elapsed.as_secs_f64(),
+        BOLD = "\x1b[1m",
+        RESET = "\x1b[0m"
+    );
+
+    exit_code
 }
 
 fn validate_pipeline(file: &str, format: &str) -> i32 {
