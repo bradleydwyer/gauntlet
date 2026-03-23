@@ -5,3 +5,5 @@ private.pem
 .cargo/config.toml
 .chunkhound/
 *.png
+*.jpg
+nanaban_*
