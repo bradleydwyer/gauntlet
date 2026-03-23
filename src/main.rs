@@ -91,6 +91,10 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Run on host, ignoring pipeline's runner (no Docker).
+        #[arg(long)]
+        host: bool,
+
         /// Auto-approve all approval tasks.
         #[arg(long)]
         auto_approve: bool,
@@ -204,6 +208,7 @@ async fn main() {
             env_overrides,
             secret_overrides,
             dry_run,
+            host,
             auto_approve,
             github_status,
             github_token,
@@ -229,6 +234,7 @@ async fn main() {
                 env_overrides,
                 secret_overrides,
                 dry_run,
+                host,
                 auto_approve,
                 github_status,
                 github_token,
@@ -356,6 +362,7 @@ struct RunConfig {
     env_overrides: Vec<String>,
     secret_overrides: Vec<String>,
     dry_run: bool,
+    host: bool,
     auto_approve: bool,
     github_status: bool,
     github_token: Option<String>,
@@ -386,6 +393,15 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     // Apply CLI overrides.
     if config.no_checkout {
         pipeline.checkout = gauntlet::schema::CheckoutSetting::Enabled(false);
+    }
+
+    // --host: override runner to run on host (no Docker).
+    if config.host {
+        pipeline.runner = None;
+        // Also clear runner on each step.
+        for step in &mut pipeline.steps {
+            step.runner = None;
+        }
     }
 
     // Parse env overrides.
