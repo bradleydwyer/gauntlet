@@ -701,14 +701,22 @@ fn resolve_cache_key(key: &str, matrix_combo: Option<&HashMap<String, String>>) 
 /// Resolve condition by substituting CI variables.
 fn resolve_condition(condition: &Option<String>, ctx: &BuildContext) -> Option<String> {
     condition.as_ref().map(|cond| {
-        let mut resolved = cond.clone();
+        // Build variable bindings for Rhai evaluation.
+        // Variables are set via `let x = "value";` prefix before the condition.
+        let mut bindings = Vec::new();
         if let Some(ref branch) = ctx.branch {
-            resolved = resolved.replace("branch", &format!("'{branch}'"));
+            bindings.push(format!("let branch = \"{branch}\";"));
+        } else {
+            bindings.push("let branch = \"\";".to_string());
         }
         if let Some(ref event) = ctx.event {
-            resolved = resolved.replace("event", &format!("'{event}'"));
+            bindings.push(format!("let event = \"{event}\";"));
+        } else {
+            bindings.push("let event = \"\";".to_string());
         }
-        resolved
+        // Convert single-quoted strings to double-quoted for Rhai compatibility.
+        let cond = cond.replace('\'', "\"");
+        format!("{} {cond}", bindings.join(" "))
     })
 }
 

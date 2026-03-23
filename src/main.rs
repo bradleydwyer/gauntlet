@@ -612,7 +612,7 @@ async fn run_pipeline(config: RunConfig) -> i32 {
 
     // Print detailed timing.
     eprintln!();
-    eprintln!("{DIM}Timing:{RESET}", DIM = "\x1b[2m", RESET = "\x1b[0m");
+    eprintln!("\x1b[2mTiming:\x1b[0m");
     eprintln!("  workspace:   {:>6.1}s", worktree_elapsed.as_secs_f64());
     eprintln!("  compile:     {:>6.1}s", compile_elapsed.as_secs_f64());
     eprintln!("  execution:   {:>6.1}s", execution_elapsed.as_secs_f64());
@@ -637,10 +637,8 @@ async fn run_pipeline(config: RunConfig) -> i32 {
     }
 
     eprintln!(
-        "  {BOLD}total:       {:>6.1}s{RESET}",
+        "  \x1b[1mtotal:       {:>6.1}s\x1b[0m",
         total_elapsed.as_secs_f64(),
-        BOLD = "\x1b[1m",
-        RESET = "\x1b[0m"
     );
 
     exit_code
