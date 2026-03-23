@@ -16,6 +16,30 @@ use gauntlet::github::GitHubClient;
 use gauntlet::schema::Pipeline;
 use gauntlet::tui::{self, TuiConfig};
 
+#[derive(Subcommand)]
+enum SecretAction {
+    /// Set a secret. Use --repo for repo-specific, or omit for global.
+    Set {
+        /// Secret name.
+        name: String,
+        /// Secret value.
+        value: String,
+        /// Repository (owner/repo). Omit for global secret.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Remove a secret.
+    Remove {
+        /// Secret name.
+        name: String,
+        /// Repository (owner/repo). Omit for global secret.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// List all secrets (names only, values hidden).
+    List,
+}
+
 #[derive(Parser)]
 #[command(name = "gauntlet", about = "CI pipeline runner powered by Tasked")]
 struct Cli {
@@ -124,6 +148,12 @@ enum Commands {
         server: String,
     },
 
+    /// Manage build secrets.
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
+    },
+
     /// Run the CI daemon (webhook receiver + optional poller).
     /// Reads defaults from ~/.gauntlet/config.json.
     Serve {
@@ -222,6 +252,10 @@ async fn main() {
             fetch_logs(&server, flow_id.as_deref(), step.as_deref()).await;
             0
         }
+        Commands::Secret { action } => {
+            manage_secret(action);
+            0
+        }
         Commands::Serve {
             data_dir,
             github_app_id,
@@ -299,6 +333,7 @@ async fn main() {
                 webhook_secret,
                 poll_interval_secs: poll_interval,
                 concurrency,
+                config: gauntlet::config::Config::load_default(),
             })
             .await;
 
@@ -717,4 +752,67 @@ async fn fetch_logs(server: &str, flow_id: Option<&str>, step: Option<&str>) {
             }
         }
     }
+}
+
+fn manage_secret(action: SecretAction) {
+    let config_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".gauntlet/config.json");
+
+    // Read existing config as raw JSON (preserve unknown fields).
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let secrets = config
+        .as_object_mut()
+        .unwrap()
+        .entry("secrets")
+        .or_insert(serde_json::json!({}));
+
+    match action {
+        SecretAction::Set { name, value, repo } => {
+            let scope = repo.as_deref().unwrap_or("*");
+            let scope_map = secrets
+                .as_object_mut()
+                .unwrap()
+                .entry(scope)
+                .or_insert(serde_json::json!({}));
+            scope_map
+                .as_object_mut()
+                .unwrap()
+                .insert(name.clone(), serde_json::json!(value));
+            println!("set {name} for {scope}");
+        }
+        SecretAction::Remove { name, repo } => {
+            let scope = repo.as_deref().unwrap_or("*");
+            if let Some(scope_map) = secrets.get_mut(scope)
+                && let Some(obj) = scope_map.as_object_mut() {
+                    obj.remove(&name);
+                    println!("removed {name} from {scope}");
+                }
+        }
+        SecretAction::List => {
+            if let Some(obj) = secrets.as_object() {
+                for (scope, scope_secrets) in obj {
+                    if let Some(keys) = scope_secrets.as_object() {
+                        for key in keys.keys() {
+                            println!("{scope}: {key} = ****");
+                        }
+                    }
+                }
+            }
+            if secrets.as_object().is_none_or(|o| o.is_empty()) {
+                println!("no secrets configured");
+            }
+            return; // Don't write config for list.
+        }
+    }
+
+    // Write config back.
+    let json = serde_json::to_string_pretty(&config).unwrap();
+    std::fs::write(&config_path, json).unwrap();
 }

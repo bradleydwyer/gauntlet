@@ -4,11 +4,12 @@
 //! for CLI arguments. CLI flags always override config file values.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::debug;
 
 /// Configuration from `~/.gauntlet/config.json`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub github_app_id: Option<u64>,
@@ -24,9 +25,26 @@ pub struct Config {
     pub poll_interval_secs: Option<u64>,
     #[serde(default)]
     pub concurrency: Option<usize>,
+    /// Secrets injected as env vars into builds.
+    /// Keys are repo full names ("owner/repo") or "*" for global.
+    #[serde(default)]
+    pub secrets: HashMap<String, HashMap<String, String>>,
 }
 
 impl Config {
+    /// Get secrets for a specific repo. Global ("*") secrets are the base,
+    /// repo-specific secrets override.
+    pub fn secrets_for_repo(&self, repo: &str) -> HashMap<String, String> {
+        let mut merged = HashMap::new();
+        if let Some(global) = self.secrets.get("*") {
+            merged.extend(global.clone());
+        }
+        if let Some(repo_secrets) = self.secrets.get(repo) {
+            merged.extend(repo_secrets.clone());
+        }
+        merged
+    }
+
     /// Load config from the default path (~/.gauntlet/config.json).
     pub fn load_default() -> Self {
         let path = dirs::home_dir()

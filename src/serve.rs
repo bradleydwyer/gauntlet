@@ -40,6 +40,7 @@ pub struct ServeConfig {
     pub webhook_secret: Option<String>,
     pub poll_interval_secs: u64,
     pub concurrency: usize,
+    pub config: crate::config::Config,
 }
 
 /// Shared state for the HTTP server and build system.
@@ -49,6 +50,7 @@ struct AppState {
     workspace: WorkspaceManager,
     webhook_secret: Option<String>,
     logs_dir: PathBuf,
+    config: crate::config::Config,
     /// Track last seen SHA per repo+branch to avoid duplicate builds.
     last_seen: Mutex<HashMap<String, String>>,
     /// Track active builds: flow_id → (repo, sha, check_run_id).
@@ -130,6 +132,7 @@ pub async fn run(config: ServeConfig) {
         workspace,
         webhook_secret: config.webhook_secret.clone(),
         logs_dir,
+        config: config.config,
         last_seen: Mutex::new(HashMap::new()),
         active_builds: Mutex::new(HashMap::new()),
         dashboard: dashboard.clone(),
@@ -466,7 +469,7 @@ async fn trigger_build(state: &AppState, event: &GitHubEvent) -> Result<(), Stri
             GitHubEvent::Push { .. } => "push".to_string(),
             GitHubEvent::PullRequest { .. } => "pull_request".to_string(),
         }),
-        env_overrides: HashMap::new(),
+        env_overrides: state.config.secrets_for_repo(&repo),
         github_token: Some(token.clone()),
     };
 

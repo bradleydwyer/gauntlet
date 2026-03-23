@@ -356,6 +356,20 @@ Options:
   --server <URL>          Daemon URL [default: http://localhost:7711]
 ```
 
+### `gauntlet secret`
+
+Manage build secrets stored in `~/.gauntlet/config.json`.
+
+```
+gauntlet secret set CLOUDFLARE_API_TOKEN "xxx"                     Set a global secret
+gauntlet secret set CLOUDFLARE_API_TOKEN "xxx" --repo owner/repo   Set a repo-specific secret
+gauntlet secret remove CLOUDFLARE_API_TOKEN                        Remove a global secret
+gauntlet secret remove CLOUDFLARE_API_TOKEN --repo owner/repo      Remove a repo-specific secret
+gauntlet secret list                                               List all secrets (values hidden)
+```
+
+Secrets are injected as environment variables into build containers. Global (`*`) secrets apply to all repos. Repo-specific secrets override globals.
+
 ### `gauntlet validate [FILE]`
 
 Validate a pipeline definition without executing.
