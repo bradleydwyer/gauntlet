@@ -656,18 +656,33 @@ fn expand_executor(
                 String::new()
             };
 
-            // Prepend setup commands from the runner config.
+            // Build cached image with setup baked in (if setup specified).
             let setup = runner.and_then(|r| r.setup()).unwrap_or("");
-            let setup_prefix = if setup.is_empty() {
-                String::new()
+            let effective_image = if setup.is_empty() {
+                image.to_string()
             } else {
-                format!("{setup}\n")
+                match crate::images::ensure_setup_image(image, setup) {
+                    Ok(cached) => cached,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to build cached setup image, using inline setup");
+                        // Fallback: prepend setup to command.
+                        let container_command = format!("{git_setup}{setup}\n{full_command}");
+                        let config = serde_json::json!({
+                            "image": image,
+                            "command": ["sh", "-c", container_command],
+                            "env": env,
+                            "volumes": volumes,
+                            "working_dir": "/workspace",
+                        });
+                        return ("container".to_string(), config);
+                    }
+                }
             };
 
-            let container_command = format!("{git_setup}{setup_prefix}{full_command}");
+            let container_command = format!("{git_setup}{full_command}");
 
             let config = serde_json::json!({
-                "image": image,
+                "image": effective_image,
                 "command": ["sh", "-c", container_command],
                 "env": env,
                 "volumes": volumes,
@@ -1270,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_setup_prepended() {
+    fn compile_setup_uses_cached_image() {
         let pipeline: Pipeline = serde_json::from_str(
             r#"{
                 "checkout": false,
@@ -1283,15 +1298,17 @@ mod tests {
         .unwrap();
         let ctx = BuildContext::default();
         let result = compile(&pipeline, &ctx).unwrap();
+        // Image should be a cached gauntlet image (or fallback to rust:latest with inline setup).
+        let image = result.flow_def.tasks[0].config["image"].as_str().unwrap();
+        assert!(
+            image.starts_with("gauntlet-cache:") || image == "rust:latest",
+            "expected cached image or fallback, got: {image}"
+        );
+        // Command should contain the actual command.
         let cmd = result.flow_def.tasks[0].config["command"]
             .as_array()
             .unwrap();
         let shell_cmd = cmd[2].as_str().unwrap();
-        assert!(shell_cmd.contains("rustup component add clippy"));
         assert!(shell_cmd.contains("cargo clippy"));
-        // Setup should come before the main command.
-        let setup_pos = shell_cmd.find("rustup component add clippy").unwrap();
-        let cmd_pos = shell_cmd.find("cargo clippy").unwrap();
-        assert!(setup_pos < cmd_pos);
     }
 }

@@ -7,6 +7,7 @@ pub mod convert;
 pub mod dashboard;
 pub mod github;
 pub mod github_app;
+pub mod images;
 pub mod matrix;
 pub mod schema;
 pub mod serve;
