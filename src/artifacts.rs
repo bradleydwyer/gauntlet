@@ -16,9 +16,8 @@ pub fn upload_task(
     let mut commands = vec![format!("cd {workspace}"), "set -eu".to_string()];
     commands.push(format!("mkdir -p \"{dest}\""));
     for pattern in patterns {
-        // Use cp -r for directories, -a for files. Handle globs.
         commands.push(format!(
-            "for f in {pattern}; do [ -e \"$f\" ] && cp -a \"$f\" \"{dest}/\" || true; done"
+            "for f in {pattern}; do [ -e \"$f\" ] && cp -a \"$f\" \"{dest}/\" && echo \"uploaded: $f ($(du -sh \"$f\" 2>/dev/null | cut -f1))\" || true; done"
         ));
     }
 
@@ -51,7 +50,7 @@ pub fn download_task(
     for source in source_task_ids {
         let src = format!("{artifacts_dir}/{source}");
         commands.push(format!(
-            "if [ -d \"{src}\" ]; then cp -a \"{src}/\"* . 2>/dev/null || true; fi"
+            "if [ -d \"{src}\" ]; then echo \"downloading from {src}: $(du -sh \"{src}\" 2>/dev/null | cut -f1)\" && cp -a \"{src}/\"* . 2>/dev/null || true; fi"
         ));
     }
 
