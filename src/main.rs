@@ -633,6 +633,16 @@ async fn run_pipeline(config: RunConfig) -> i32 {
                 _ => " ",
             };
             eprintln!("    {state} {:<24} {:>6}", task.id.0, duration);
+            // Show first few lines of stdout for debugging.
+            if let Some(ref output) = task.output
+                && let Some(stdout) = output.get("stdout").and_then(|v| v.as_str())
+            {
+                for line in stdout.lines().take(3) {
+                    if !line.trim().is_empty() {
+                        eprintln!("      \x1b[2m{line}\x1b[0m");
+                    }
+                }
+            }
         }
     }
 
