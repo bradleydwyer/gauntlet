@@ -1,5 +1,5 @@
 {
-  "runner": { "image": "rust:latest", "setup": "rustup component add clippy rustfmt" },
+  "runner": "rust-ci",
   "steps": [
     { "key": "fmt",    "command": "cargo fmt --check" },
     { "key": "clippy", "command": "cargo clippy -- -D warnings", "artifacts": ["target/"] },
